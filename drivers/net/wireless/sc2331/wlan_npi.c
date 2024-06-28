@@ -51,10 +51,18 @@ static bool is_npi_start_cmd(void *buf)
 
 	msg = (struct npi_cmd_hdr *)buf;
 	if ((msg->type == HOST_TO_MARLIN_CMD) &&
-		(msg->subtype == WLNPI_CMD_START))
+	    (msg->subtype == WLNPI_CMD_START))
 		return true;
 	else
 		return false;
+}
+static bool is_sta_or_p2p_open(void)
+{
+	if (g_wlan.netif[0].mode == ITM_NONE_MODE ||
+	    g_wlan.netif[1].mode == ITM_NONE_MODE)
+		return false;
+	else
+		return true;
 }
 #endif
 
@@ -66,14 +74,40 @@ static int wlan_nl_npi_handler(struct sk_buff *skb_2, struct genl_info *info)
 	unsigned char r_buf[1024] = { 0 };
 	unsigned short r_len = 0;
 	unsigned char dbgStr[64] = { 0 };
+
+#ifdef CONFIG_MACH_SAMSUNG
+	bool flag = true;
+	/*npi start response head*/
+	struct npi_cmd_hdr hdr = {
+		.type = 0x2,
+		.subtype = 0x0,
+	};
+	int err = -100;
+#endif
 	printkd("[%s][enter]\n", __func__);
 	if (info == NULL) {
 		printkd("[%s][%d][ERROR]\n", __func__, __LINE__);
-		return ret;
+#ifdef CONFIG_MACH_SAMSUNG
+		flag = false;
+#endif
+		goto out;
 	}
 	if (info->attrs[WLAN_NL_ATTR_COMMON_USR_TO_DRV]) {
 		s_buf = nla_data(info->attrs[WLAN_NL_ATTR_COMMON_USR_TO_DRV]);
 		s_len = nla_len(info->attrs[WLAN_NL_ATTR_COMMON_USR_TO_DRV]);
+#ifdef CONFIG_MACH_SAMSUNG
+		if (is_npi_start_cmd(s_buf)) {
+			if (is_sta_or_p2p_open()) {
+				flag = false;
+				hdr.len = sizeof(err);
+				r_len = sizeof(hdr) + hdr.len;
+				memcpy(r_buf, &hdr, sizeof(hdr));
+				memcpy(r_buf + sizeof(hdr), &err, hdr.len);
+				printke("wifi is already open, please close!!!\n");
+				goto out;
+			}
+		}
+#endif
 		sprintf(dbgStr, "[iwnpi][SEND][%d]:", s_len);
 		hex_dump(dbgStr, strlen(dbgStr), s_buf, s_len);
 		wlan_cmd_npi_send_recv(s_buf, s_len, r_buf, &r_len);
@@ -85,7 +119,7 @@ out:
 	    wlan_nl_send_generic(info, WLAN_NL_ATTR_COMMON_DRV_TO_USR,
 				 WLAN_NL_CMD_NPI, r_len, r_buf);
 #ifdef CONFIG_MACH_SAMSUNG
-	if (is_npi_start_cmd(s_buf)) {
+	if (is_npi_start_cmd(s_buf) && flag == true) {
 		msleep(100);
 		wlan_cmd_set_psm_cap();
 	}
@@ -96,16 +130,21 @@ out:
 static int wlan_nl_get_info_handler(struct sk_buff *skb_2,
 				    struct genl_info *info)
 {
-	int ret;
-	unsigned char r_buf[64] = { 0 };
-	unsigned short r_len = 0;
-	memcpy(r_buf, &(g_wlan.netif[0].ndev->dev_addr[0]), 6);
-	r_len = 6;
-	printkd("[%s][enter]\n", __func__);
-	ret =
-	    wlan_nl_send_generic(info, WLAN_NL_ATTR_COMMON_DRV_TO_USR,
-				 WLAN_NL_CMD_GET_INFO, r_len, r_buf);
-	return ret;
+#define RSP_LEN		6
+	unsigned char r_buf[64];
+
+	printkd("enter %s ...\n", __func__);
+	if (IS_ERR(&g_wlan) || IS_ERR(&(g_wlan.netif[0])) ||
+			IS_ERR(g_wlan.netif[0].ndev) ||
+			IS_ERR(&(g_wlan.netif[0].ndev->dev_addr[0]))) {
+		printkd("Please insmod wlan driver!!!");
+		return -ENODEV;
+	}
+	memset(r_buf, 0, sizeof(r_buf));
+	memcpy(r_buf, &(g_wlan.netif[0].ndev->dev_addr[0]), RSP_LEN);
+	return wlan_nl_send_generic(info,
+			WLAN_NL_ATTR_COMMON_DRV_TO_USR,
+			WLAN_NL_CMD_GET_INFO, RSP_LEN, r_buf);
 }
 
 static struct nla_policy wlan_genl_policy[WLAN_NL_ATTR_MAX + 1] = {

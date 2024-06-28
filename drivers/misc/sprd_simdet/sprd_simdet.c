@@ -123,7 +123,7 @@ static irqreturn_t sim_detect_irq_handler(int irq, void *dev)
         sim_gpio_detect_value_last = gpio_get_value(sprd_sd->platform_data->gpio_detect);
         PRINT_DBG("sim_detect_irq_handler: IRQ_%d(GPIO_%d) = %d\n",
                   sprd_sd->irq_detect, sprd_sd->platform_data->gpio_detect, sim_gpio_detect_value_last);
-        queue_delayed_work(sprd_sd->detect_work_queue, &sprd_sd->work_detect, msecs_to_jiffies(0));
+        queue_delayed_work(sprd_sd->detect_work_queue, &sprd_sd->work_detect, msecs_to_jiffies(500));
 
         return IRQ_HANDLED;
 }
@@ -139,29 +139,27 @@ static void sim_detect_work_func(struct work_struct *work)
 
         ENTER;
 
-        if(0 == sim_plug_state_last) {
-                gpio_detect_value_current = gpio_get_value(pdata->gpio_detect);
-                PRINT_INFO("gpio_detect_value_current = %d, gpio_detect_value_last = %d, plug_state_last = %d\n",
-                           gpio_detect_value_current, sim_gpio_detect_value_last, sim_plug_state_last);
+		gpio_detect_value_current = gpio_get_value(pdata->gpio_detect);
+		PRINT_INFO("gpio_detect_value_current = %d, gpio_detect_value_last = %d, plug_state_last = %d\n",
+				gpio_detect_value_current, sim_gpio_detect_value_last, sim_plug_state_last);
 
-                if(gpio_detect_value_current != sim_gpio_detect_value_last) {
-                        PRINT_INFO("software debance (step 1)!!!(sim_detect_work_func)\n");
-                        goto out;
-                }
+		if(gpio_detect_value_current != sim_gpio_detect_value_last) {
+			PRINT_INFO("software debance (step 1)!!!(sim_detect_work_func)\n");
+			goto out;
+		}
 
-                if(1 == pdata->irq_trigger_level_detect) {
-                        if(1 == gpio_detect_value_current)
-                                plug_state_current = 1;
-                        else
-                                plug_state_current = 0;
-                } else {
-                        if(0 == gpio_detect_value_current)
-                                plug_state_current = 1;
-                        else
-                                plug_state_current = 0;
-                }
-        } else
-                plug_state_current = 0;//no debounce for plug out!!!
+		if(1 == pdata->irq_trigger_level_detect) {
+			if(1 == gpio_detect_value_current)
+				plug_state_current = 1;
+			else
+				plug_state_current = 0;
+		} else {
+			if(0 == gpio_detect_value_current)
+				plug_state_current = 1;
+			else
+				plug_state_current = 0;
+		}
+
 
         if(1 == plug_state_current && 0 == sim_plug_state_last) {
 

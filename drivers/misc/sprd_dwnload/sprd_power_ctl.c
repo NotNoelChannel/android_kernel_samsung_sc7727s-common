@@ -103,9 +103,7 @@ static void sprd_download_poweron(bool enable)
 {
 	int ret;
 	const char *vdd_dwnld;
-	const char *vdd_pa;
 	static struct regulator *download_vdd = NULL;
-	static struct regulator *vddwifipa = NULL;
 	struct device_node *np;
 
 	np = of_find_node_by_name(NULL, "sprd-marlin");
@@ -118,11 +116,6 @@ static void sprd_download_poweron(bool enable)
 		printk(KERN_ERR"get vdd-download failed");
 		return;
 	}
-	ret = of_property_read_string(np, "vdd-pa", &vdd_pa);
-	if (ret) {
-		printk(KERN_ERR"get vdd-pa failed");
-		return;
-	}
 	if (download_vdd == NULL) {
 		download_vdd = regulator_get(NULL, vdd_dwnld);
 
@@ -132,24 +125,21 @@ static void sprd_download_poweron(bool enable)
 		}
 	}
 
-	if (vddwifipa == NULL) {
-		vddwifipa = regulator_get(NULL, vdd_pa);
-		if (IS_ERR(vddwifipa)) {
-			printk(KERN_ERR"Get regulator of vdd-pa  error!\n");
-			return;
-		}
-	}
 
 	if (enable) {
 		regulator_set_voltage(download_vdd, 1600000, 1600000);
 		ret = regulator_enable(download_vdd);
-
-		regulator_set_voltage(vddwifipa, 3300000, 3300000);
-		ret = regulator_enable(vddwifipa);
+#if defined CONFIG_MACH_J1POP3G
+        gpio_request(214,"wifi_power_en");
+        gpio_direction_output(214,1);
+#endif
 	}
 	else if (regulator_is_enabled(download_vdd)) {
 		ret = regulator_disable(download_vdd);
-		ret = regulator_disable(vddwifipa);
+#if defined CONFIG_MACH_J1POP3G
+		gpio_request(214,"wifi_power_en");
+        gpio_direction_output(214,0);
+#endif
 	}
 }
 

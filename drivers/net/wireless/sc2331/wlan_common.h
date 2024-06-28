@@ -104,6 +104,7 @@ typedef struct {
 	unsigned short bit_map;
 	spinlock_t lock;
 	int gpio_high;
+	int chn_timeout_cnt;
 	unsigned long timeout;
 	unsigned long timeout_time;
 	bool timeout_flag;
@@ -127,6 +128,8 @@ typedef enum {
 typedef struct {
 	int exit;
 	struct semaphore sem;
+	int drv_status;
+	int cp2_status;
 } drv_sync_t;
 
 typedef struct {
@@ -158,6 +161,9 @@ typedef struct {
 	unsigned int need_rx;
 	unsigned int done_rx;
 	atomic_t retry;
+	/*exit_status: 0 --not exit; 1--already exit. */
+	atomic_t exit_status;
+	int exit_flag;
 } wlan_thread_t;
 
 typedef struct {
@@ -174,6 +180,7 @@ typedef struct {
 	struct mutex cmd_lock;
 	struct mutex mem_lock;
 	unsigned char *mem;
+	atomic_t refcnt;
 } wlan_cmd_t;
 
 typedef struct {
@@ -236,7 +243,7 @@ typedef struct {
 	msg_q_t msg_q[2];
 	bool tcp_ack_suppress;
 	wlan_tcp_session_t tcp_session[MAX_TCP_SESSION];
-	struct wlan_cmd_hidden_ssid	hssid;
+	struct wlan_cmd_hidden_ssid hssid;
 } wlan_vif_t;
 
 typedef struct {
@@ -276,10 +283,10 @@ extern void wlan_nl_init(void);
 extern void wlan_nl_deinit(void);
 
 extern bool get_sdiohal_status(void);
-extern int  sdio_chn_status(unsigned short chn, unsigned short *status);
-extern int  sdio_dev_read(unsigned int chn, void *read_buf, unsigned int *count);
-extern int  sdio_dev_write(unsigned int chn, void *data_buf, unsigned int count);
-extern int  sdiodev_readchn_init(int chn, void *callback, bool with_para);
+extern int sdio_chn_status(unsigned short chn, unsigned short *status);
+extern int sdio_dev_read(unsigned int chn, void *read_buf, unsigned int *count);
+extern int sdio_dev_write(unsigned int chn, void *data_buf, unsigned int count);
+extern int sdiodev_readchn_init(int chn, void *callback, bool with_para);
 extern int sdio_read_wlan(unsigned int chn, void *read_buf,
 			  unsigned int *count);
 extern int sdiodev_readchn_uninit(unsigned int chn);

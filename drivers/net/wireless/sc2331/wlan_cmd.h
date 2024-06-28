@@ -24,7 +24,7 @@ enum ITM_HOST_TROUT3_CMD_LIST {
 	WIFI_CMD_SET_PAIRWISE_CIPHER,
 	WIFI_CMD_SET_GROUP_CIPHER,
 	WIFI_CMD_SET_AKM_SUITE,
-	WIFI_CMD_SET_CHANNEL,	/*10-0xA*/
+	WIFI_CMD_SET_CHANNEL,	/*10-0xA */
 	WIFI_CMD_SET_BSSID,
 	WIFI_CMD_SET_ESSID,
 	WIFI_CMD_KEY_ADD,
@@ -34,7 +34,7 @@ enum ITM_HOST_TROUT3_CMD_LIST {
 	WIFI_CMD_SET_RTS_THRESHOLD,
 	WIFI_CMD_SET_FRAG_THRESHOLD,
 	WIFI_CMD_SET_PMKSA,
-	WIFI_CMD_DEL_PMKSA,	/*20--0x14*/
+	WIFI_CMD_DEL_PMKSA,	/*20--0x14 */
 	WIFI_CMD_FLUSH_PMKSA,
 	WIFI_CMD_SET_DEV_OPEN,
 	WIFI_CMD_SET_DEV_CLOSE,
@@ -44,7 +44,7 @@ enum ITM_HOST_TROUT3_CMD_LIST {
 	WIFI_CMD_TX_MGMT,
 	WIFI_CMD_REMAIN_CHAN,
 	WIFI_CMD_CANCEL_REMAIN_CHAN,
-	WIFI_CMD_P2P_IE,	/*30---0x1e*/
+	WIFI_CMD_P2P_IE,	/*30---0x1e */
 	WIFI_CMD_CHANGE_BEACON,
 	WIFI_CMD_REGISTER_FRAME,
 	WIFI_CMD_NPI_MSG,
@@ -96,10 +96,10 @@ enum WLNPI_CMD_TYPE {
 };
 
 struct npi_cmd_hdr {
-	unsigned char  type;
-	unsigned char  subtype;
+	unsigned char type;
+	unsigned char subtype;
 	unsigned short len;
-} __attribute__((packed));
+} __attribute__ ((packed));
 #endif
 
 struct wlan_cmd_add_key {
@@ -257,9 +257,9 @@ struct wlan_cmd_cancel_remain_chan_t {
 
 struct wlan_cmd_mgmt_tx_t {
 	u8 chan;		/* send channel */
-	u8 dont_wait_for_ack;	/*don't wait for ack*/
+	u8 dont_wait_for_ack;	/*don't wait for ack */
 	u32 wait;		/* wait time */
-	u64 cookie;    /* cookie */
+	u64 cookie;		/* cookie */
 	u32 len;		/* mac length */
 	u8 value[0];		/* mac */
 } __attribute__ ((packed));
@@ -299,11 +299,11 @@ struct wlan_event_report_frame_t {
 } __attribute__ ((packed));
 
 struct wlan_report_mgmt_tx_status {
-	u64 cookie;     /* cookie */
-	u8 ack;     /* status */
-	u32 len;    /* frame len */
-	u8  buf[0];     /* mgmt frame */
-}  __attribute__((packed));
+	u64 cookie;		/* cookie */
+	u8 ack;			/* status */
+	u32 len;		/* frame len */
+	u8 buf[0];		/* mgmt frame */
+} __attribute__ ((packed));
 
 typedef struct {
 	unsigned char ops;
@@ -411,6 +411,7 @@ extern int wlan_cmd_set_regdom(unsigned char vif_id, unsigned char *regdom,
 			       unsigned int len);
 extern int wlan_cmd_cmq_rssi(unsigned char vif_id, s32 rssi_thold,
 			     u32 rssi_hyst, unsigned char type);
-extern int wlan_cmd_disassoc(unsigned char vif_id, const unsigned char *mac_addr,
-                             unsigned short reason_code);
+extern int wlan_cmd_disassoc(unsigned char vif_id,
+			     const unsigned char *mac_addr,
+			     unsigned short reason_code);
 #endif

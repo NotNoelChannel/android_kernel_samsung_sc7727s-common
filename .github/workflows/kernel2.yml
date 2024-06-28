@@ -1,0 +1,40 @@
+name: Kernel CI (SM-J100H)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: Checkout Kernel Source
+      uses: actions/checkout@v2
+
+    - name: Getting Toolchain
+      run: |
+        sudo apt-get install lib32z1
+        sudo git clone --depth 1 --branch android-4.4.4_r2.0.1 --single-branch https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-eabi-4.7 /opt/toolchains/arm-eabi-4.7/
+
+    - name: Building Kernel
+      run: |
+        make -j2 cyanogenmod_j13g_defconfig
+        make -j2
+
+    - name: Moving Output # CI only
+      run: |
+        mkdir -p /home/runner/work/output
+        cp arch/arm/boot/zImage /home/runner/work/output/zImage
+        find . -name "*.ko" -exec cp {} /home/runner/work/output/ \;
+
+    - name: Uploading Output
+      uses: actions/upload-artifact@v2
+      with:
+        name: zImage
+        path: /home/runner/work/output/zImage
+
+    - name: Uploading Modules
+      uses: actions/upload-artifact@v2
+      with:
+        name: modules
+        path: /home/runner/work/output/*.ko

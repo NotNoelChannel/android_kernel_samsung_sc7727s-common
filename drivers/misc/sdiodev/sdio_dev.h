@@ -97,8 +97,6 @@ struct sdio_data {
 	const char *sdhci;
 };
 
-extern volatile bool marlin_mmc_suspend;
-
 
 #define MARLIN_SDIO_VERSION	"1.0"
 #define INVALID_SDIO_CHN 16

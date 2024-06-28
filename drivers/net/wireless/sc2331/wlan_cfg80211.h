@@ -55,6 +55,9 @@
 #define MAX_SCAN_FRAME_BUF_NUM       (150)
 #define LTE_CONCUR_REQ               (100)
 
+#define wlan_2GHZ_CH01_11	REG_RULE(2412-10, 2462+10, 20, 0, 20, 0)
+#define wlan_2GHZ_CH12_13	REG_RULE(2467-10, 2472+10, 20, 0, 20, 0)
+
 enum wlan_mode {
 	ITM_NONE_MODE,
 	ITM_STATION_MODE,
@@ -151,7 +154,7 @@ extern void cfg80211_report_cqm_high(unsigned char vif_id, unsigned char *pdata,
 extern void cfg80211_report_cqm_beacon_loss(unsigned char vif_id,
 					    unsigned char *pdata, int len);
 extern void cfg80211_report_version(unsigned char vif_id,
-				unsigned char *pdata, int len);
-extern void cfg80211_report_mlme_tx_status(unsigned char vif_id, unsigned char *pdata,
-					int len);
+				    unsigned char *pdata, int len);
+extern void cfg80211_report_mlme_tx_status(unsigned char vif_id,
+					   unsigned char *pdata, int len);
 #endif

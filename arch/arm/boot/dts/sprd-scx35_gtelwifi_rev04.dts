@@ -311,7 +311,7 @@
 		battery,swelling_low_temp_block = <50>;
 		battery,swelling_low_temp_recov = <100>;
 		battery,swelling_chg_current = <2000>;
-		battery,swelling_drop_float_voltage = <4170>;
+		battery,swelling_drop_float_voltage = <4180>;
 		battery,swelling_high_rechg_voltage = <4130>;
 		battery,swelling_low_rechg_voltage = <4030>;
 		battery,swelling_block_time = <600>;

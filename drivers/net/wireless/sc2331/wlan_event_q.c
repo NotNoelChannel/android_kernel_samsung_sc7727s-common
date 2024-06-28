@@ -122,8 +122,8 @@ int event_q_init(m_event_t *mEventQ, m_event_conf_t *conf)
 	mEventQ->event_buf =
 	    (unsigned char
 	     *)(WORD_ALIGN((unsigned int)(mEventQ->buf_status +
-					  EVENT_STATUS_SIZE(mEventQ->
-							    max_events))));
+					  EVENT_STATUS_SIZE
+					  (mEventQ->max_events))));
 	spin_lock_init(&(mEventQ->spinlock));
 	return OK;
 }
@@ -135,4 +135,3 @@ int event_q_deinit(m_event_t *mEventQ)
 	memset((unsigned char *)mEventQ, 0, sizeof(m_event_t));
 	return OK;
 }
-

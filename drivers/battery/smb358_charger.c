@@ -236,6 +236,7 @@ static int smb358_get_charging_status(struct i2c_client *client)
 	u8 data_e = 0;
 	u8 therm_control_a = 0;
 	u8 other_control_a = 0;
+	u8 irq_status_c = 0;
 
 
 	/*smb358_test_read(client);*/
@@ -261,10 +262,14 @@ static int smb358_get_charging_status(struct i2c_client *client)
 	smb358_i2c_read(client, SMB358_OTHER_CONTROL_A, &other_control_a);
 	dev_dbg(&client->dev,
 		"%s : OTHER_CONTROL_A(0x%02x)\n", __func__, other_control_a);
+
+	smb358_i2c_read(client, SMB358_INTERRUPT_STATUS_C, &irq_status_c);
+	dev_dbg(&client->dev,
+		"%s : INTERRUPT_STATUS_C(0x%02x)\n", __func__, irq_status_c);
 	/* At least one charge cycle terminated,
 	 * Charge current < Termination Current
 	 */
-	if (data_c & 0x20) {
+	if ((data_c & 0x20) || (irq_status_c & 0x03)) {
 		/* top-off by full charging */
 		status = POWER_SUPPLY_STATUS_FULL;
 		goto charging_status_end;
@@ -723,19 +728,6 @@ static void smb358_charger_function_control(
 			full_check_type = charger->pdata->full_check_type_2nd;
 
 		smb358_i2c_read(client, SMB358_COMMAND_A, &data);
-		if (data & 0x02) {
-			chgcurrent = 0;
-			smb358_i2c_read(client, SMB358_CHARGE_CURRENT, &chgcurrent);
-			chgcurrent &= 0xE0; /* get fast charging current */
-
-			if (chgcurrent == smb358_get_fast_charging_current_data(
-					charger->charging_current)) {
-				pr_info("[SMB358] Skip the Same charging current setting\n");
-				goto control_skip;
-			}
-		}
-
-		smb358_i2c_read(client, SMB358_COMMAND_A, &data);
 
 		if ((data & 0x10) && charger->pdata->vbus_ctrl_gpio) {
 			int level;
@@ -767,7 +759,7 @@ static void smb358_charger_function_control(
 			/* no charge or aicl not complete*/
 			if (((status_c & 0x06) == 0) || (status_e & 0x10) == 0)
 				smb358_set_command(client,
-						SMB358_COMMAND_A, 0xC2);
+						SMB358_COMMAND_A, 0xC0);
 		}
 
                 /* [STEP - 2] ================================================
@@ -942,8 +934,8 @@ static void smb358_charger_function_control(
 		case SEC_BATTERY_FULLCHARGED_CHGGPIO:
 		case SEC_BATTERY_FULLCHARGED_CHGINT:
 		case SEC_BATTERY_FULLCHARGED_CHGPSY:
-			/* Enable Current Termination */
-			data &= 0xBF;
+			/* disable Current Termination loop */
+			data &= 0xFF;
 			break;
 		}
 		smb358_set_command(client,

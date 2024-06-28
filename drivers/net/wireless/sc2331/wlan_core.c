@@ -25,6 +25,22 @@ wlan_info_t g_wlan = { 0 };
 
 unsigned int g_dbg = 0xFFFFFFFF;
 
+wlan_ieee80211_regdomain wlan_regdom_11 = {
+	.n_reg_rules = 1,
+	.alpha2 = "US",
+	.reg_rules = {
+		      wlan_2GHZ_CH01_11,
+              }
+};
+
+wlan_ieee80211_regdomain wlan_regdom_12_13 = {
+	.n_reg_rules = 2,
+	.alpha2 = "00",
+	.reg_rules = {
+		      wlan_2GHZ_CH01_11,
+			  wlan_2GHZ_CH12_13,
+		      }
+};
 void core_up(void)
 {
 	up(&(g_wlan.wlan_core.sem));
@@ -47,7 +63,7 @@ void core_try_down(int retry)
 	atomic_set(&(thread->retry), retry);
 	sem_count = g_wlan.wlan_core.sem.count;
 	do {
-		if(g_wlan.sync.exit)
+		if (g_wlan.wlan_core.exit_flag)
 			break;
 		down(&(g_wlan.wlan_core.sem));
 	}
@@ -71,6 +87,27 @@ void trans_up(void)
 void trans_down(void)
 {
 	down(&(g_wlan.wlan_trans.sem));
+}
+
+static void wlan_thread_exit(void)
+{
+	printkd("[%s] enter\n", __func__);
+	if (g_wlan.wlan_core.exit_flag == 0) {
+		g_wlan.wlan_core.exit_flag = 1;
+		do {
+			core_up();
+			usleep_range(300, 500);
+		} while (1 != atomic_read(&(g_wlan.wlan_core.exit_status)));
+	}
+
+	if (g_wlan.wlan_trans.exit_flag == 0) {
+		g_wlan.wlan_trans.exit_flag = 1;
+		do {
+			trans_up();
+			usleep_range(300, 500);
+		} while (1 != atomic_read(&(g_wlan.wlan_trans.exit_status)));
+	}
+	printkd("[%s] exit\n", __func__);
 }
 
 bool stop_net(unsigned char id)
@@ -105,6 +142,8 @@ static int hw_rx(const unsigned short chn, unsigned char *buf,
 	static unsigned int cnt;
 	if (NULL == buf)
 		return ERROR;
+	if (2 == g_wlan.sync.cp2_status)
+		return ERROR;
 	ret = sdio_dev_read(chn, buf, &read_len);
 	*len = read_len;
 	if (0 != ret) {
@@ -135,6 +174,8 @@ static int hw_tx(const unsigned short chn, unsigned char *buf, unsigned int len)
 	printkp("[tx][%d][%d]\n", big_hdr->tx_cnt, chn);
 	len = (len + 1023) & 0xFC00;
 	wlan_tx_buf_decode(buf, len);
+	if (2 == g_wlan.sync.cp2_status)
+		return ERROR;
 	ret = sdio_dev_write(chn, buf, len);
 	if (0 != ret) {
 		printke("call sdio_dev_write err:%d\n", ret);
@@ -247,13 +288,19 @@ static int wlan_xmit(struct sk_buff *skb, struct net_device *dev)
 	int ret, addr_len = 0;
 	struct sk_buff *wapi_skb;
 
+	if (2 == g_wlan.sync.cp2_status) {
+		dev_kfree_skb(skb);
+		return NETDEV_TX_OK;
+	}
+
 	vif = ndev_to_vif(dev);
 	msg_q = wlan_tcpack_q(vif, skb->data, skb->len);
 
 	if (vif->cfg80211.cipher_type == WAPI
 	    && vif->cfg80211.connect_status == ITM_CONNECTED
-	    && vif->cfg80211.key_len[PAIRWISE][vif->cfg80211.
-					       key_index[PAIRWISE]] != 0
+	    && vif->cfg80211.key_len[PAIRWISE][vif->
+					       cfg80211.key_index[PAIRWISE]] !=
+	    0
 	    && (*(u16 *) ((u8 *) skb->data + ETH_PKT_TYPE_OFFSET) != 0xb488)) {
 		wapi_skb = dev_alloc_skb(skb->len + 100 + NET_IP_ALIGN);
 		skb_reserve(wapi_skb, NET_IP_ALIGN);
@@ -378,7 +425,7 @@ static void wlan_tx_timeout(struct net_device *dev)
 	return;
 }
 
-#define HIDDEN_SSID		"HIDDEN_SSID"
+#define HIDDEN_SSID			"HIDDEN_SSID"
 int wlan_priv_cmd(struct net_device *dev, struct ifreq *ifr)
 {
 	int ret = 0;
@@ -395,19 +442,19 @@ int wlan_priv_cmd(struct net_device *dev, struct ifreq *ifr)
 	if (copy_from_user(&priv_cmd, ifr->ifr_data,
 			   sizeof(struct android_wifi_priv_cmd))) {
 		printke("%s: %s Failed to copy user priv data!\n",
-				__func__, dev->name);
+			__func__, dev->name);
 		return -EFAULT;
 	}
 
 	command = kmalloc(priv_cmd.total_len, GFP_KERNEL);
 	if (!command) {
 		printke("%s: %s Failed to allocate command!\n",
-				__func__, dev->name);
+			__func__, dev->name);
 		return -ENOMEM;
 	}
 	if (copy_from_user(command, priv_cmd.buf, priv_cmd.total_len)) {
 		printke("%s: %s Failed to copy user buf data!\n",
-				__func__, dev->name);
+			__func__, dev->name);
 		ret = -EFAULT;
 		goto exit;
 	}
@@ -415,9 +462,13 @@ int wlan_priv_cmd(struct net_device *dev, struct ifreq *ifr)
 	if (strnicmp(command, HIDDEN_SSID, strlen(HIDDEN_SSID)) == 0) {
 		int skip = strlen(HIDDEN_SSID) + 1;
 		struct wlan_cmd_hidden_ssid *hssid = &(vif->hssid);
-		sscanf(command + skip, "%x %x %s",
-			   &(hssid->ignore_broadcast_ssid),
-			   &(hssid->ssid_len), hssid->ssid);
+
+		sscanf(command + skip, "%x %x",
+				&(hssid->ignore_broadcast_ssid),
+				&(hssid->ssid_len));
+		strncpy(hssid->ssid,
+				command + strlen(HIDDEN_SSID) +1 +10,
+				hssid->ssid_len);
 		printke("broadcast:%x\n", hssid->ignore_broadcast_ssid);
 		printke("len:%x\n", hssid->ssid_len);
 		printke("ssid:%s\n", hssid->ssid);
@@ -429,11 +480,77 @@ exit:
 	return ret;
 }
 
+int wlan_set_country_code(struct net_device *dev, struct ifreq *ifr)
+{
+
+    int ret = 0;
+    char *buf = NULL, *ptr;
+    struct android_wifi_priv_cmd priv_cmd;
+    wlan_vif_t *vif;
+    unsigned char vif_id;
+    int rd_size;
+
+    vif = ndev_to_vif(dev);
+    vif_id = vif->id;
+
+    printkd("[%s][enter]\n", __func__);
+    if (!ifr->ifr_data)
+        return -EINVAL;
+    if (copy_from_user(&priv_cmd, ifr->ifr_data,
+                            sizeof(struct android_wifi_priv_cmd))) {
+        printke("copy usr data failed! \n");
+        return -EFAULT;
+    }
+
+    buf = kmalloc(priv_cmd.total_len + 1, GFP_KERNEL);
+    if (!buf) {
+        printke("malloc error!\n");
+        return -ENOMEM;
+    }
+    memset(buf, 0x00, priv_cmd.total_len + 1);
+
+    if (copy_from_user(buf, priv_cmd.buf, priv_cmd.total_len)) {
+        printke("copy failed from user space\n");
+        kfree(buf);
+        return -EFAULT;
+    }
+
+    ptr = strchr(buf, ' ');
+    if (ptr == NULL) {
+        printke("Command format error!\n");
+        kfree(buf);
+        return -1;
+    }
+
+    *ptr = 0;
+    ptr++;
+
+    if ((strcmp(buf, "COUNTRY") == 0) &&
+                    (strlen(ptr) == 2)) {
+        if (strcmp(ptr, "US") == 0) {
+            rd_size = sizeof(wlan_ieee80211_regdomain) + sizeof(struct ieee80211_reg_rule);
+            wlan_cmd_set_regdom(0, (unsigned char *)(&wlan_regdom_11), rd_size);
+        } else {
+            rd_size = sizeof(wlan_ieee80211_regdomain) + 2 * sizeof(struct ieee80211_reg_rule);
+            wlan_cmd_set_regdom(0, (unsigned char *)(&wlan_regdom_12_13), rd_size);
+        }
+    } else {
+        printke("Key words not support!\n");
+        kfree(buf);
+        return -1;
+    }
+
+    kfree(buf);
+    return 0;
+}
+
 static int wlan_ioctl(struct net_device *ndev, struct ifreq *req, int cmd)
 {
 	switch (cmd) {
 	case SIOCDEVPRIVATE + 1:
 		return wlan_priv_cmd(ndev, req);
+    case SIOCDEVPRIVATE + 3:
+        return wlan_set_country_code(ndev, req);
 	default:
 		printke("ioctl cmd id = %d undefined\n", cmd);
 		return -ENOTSUPP;
@@ -442,45 +559,67 @@ static int wlan_ioctl(struct net_device *ndev, struct ifreq *req, int cmd)
 }
 
 struct net_device_ops wlan_ops = {
-	.ndo_open                 = wlan_open,
-	.ndo_stop                 = wlan_close,
-	.ndo_start_xmit           = wlan_xmit,
-	.ndo_get_stats            = wlan_status,
-	.ndo_tx_timeout           = wlan_tx_timeout,
-	.ndo_do_ioctl             = wlan_ioctl,
+	.ndo_open = wlan_open,
+	.ndo_stop = wlan_close,
+	.ndo_start_xmit = wlan_xmit,
+	.ndo_get_stats = wlan_status,
+	.ndo_tx_timeout = wlan_tx_timeout,
+	.ndo_do_ioctl = wlan_ioctl,
 };
 
 static void wlan_early_suspend(struct early_suspend *es)
 {
 	printkd("[%s]\n", __func__);
-    g_wlan.hw.suspend = 1;
+	g_wlan.hw.suspend = 1;
 	wlan_cmd_sleep(1);
 }
 
 static void wlan_late_resume(struct early_suspend *es)
 {
 	printkd("[%s]\n", __func__);
-    g_wlan.hw.suspend = 0;
+	g_wlan.hw.suspend = 0;
 	wlan_cmd_sleep(2);
 }
 
-int wlan_wakeup(void)
+void wlan_wakeup(void)
 {
-	int ret = 0;
-	if (0 != g_wlan.hw.wakeup)
-	{
-        if ((1 == g_wlan.hw.suspend) && (1 == g_wlan.hw.is_timer_set) )
-            mod_timer(&(g_wlan.hw.wakeup_timer),jiffies + msecs_to_jiffies(g_wlan.hw.wakeup_time));
-		return OK;
+	if (0 != g_wlan.hw.wakeup) {
+		return;
 	}
+	printkd("timer[0]\n");
 	wake_lock(&g_wlan.hw.wlan_lock);
-	printkd("time[1]\n");
 	mod_timer(&(g_wlan.hw.wakeup_timer),
 		  jiffies + msecs_to_jiffies(g_wlan.hw.wakeup_time));
-    g_wlan.hw.is_timer_set = 1;
 	g_wlan.hw.wakeup = 1;
 	g_wlan.hw.can_sleep = 0;
-	return ret;
+	return;
+}
+
+int buf_empty(void)
+{
+	int i, j;
+	msg_q_t *msg_q;
+	txfifo_t *txfifo;
+	rxfifo_t *rxfifo;
+	rxfifo = &(g_wlan.rxfifo);
+	if (rx_fifo_used(rxfifo) || (0 != gpio_get_value(g_wlan.hw.rx_gpio)))
+		return ERROR;
+	for (i = 0; i < 2; i++) {
+		txfifo = &(g_wlan.netif[i].txfifo);
+		if (tx_fifo_used(txfifo))
+			return ERROR;
+		for (j = 0; j < 2; j++) {
+			msg_q = &(g_wlan.netif[i].msg_q[j]);
+			if (msg_num(msg_q))
+				return ERROR;
+		}
+		for (j = 0; j < MAX_TCP_SESSION; j++) {
+			msg_q = &(g_wlan.netif[i].tcp_session[j].msg_q);
+			if (msg_num(msg_q))
+				return ERROR;
+		}
+	}
+	return OK;
 }
 
 void wlan_sleep(void)
@@ -488,53 +627,23 @@ void wlan_sleep(void)
 	if ((1 != g_wlan.hw.wakeup) || (0 == g_wlan.hw.can_sleep))
 		return;
 	g_wlan.hw.wakeup = 0;
-	printkd("time[0]\n");
+	printkd("timer[3]\n");
 	wake_unlock(&g_wlan.hw.wlan_lock);
 	return;
 }
 
-int buf_empty(void )
-{
-    int i,j;
-    msg_q_t   *msg_q;
-    txfifo_t  *txfifo;
-    rxfifo_t  *rxfifo;
-    rxfifo     = &(g_wlan.rxfifo);
-    if( rx_fifo_used(rxfifo) )
-        return ERROR;
-    for(i=0; i<2; i++)
-    {
-        txfifo = &(g_wlan.netif[i].txfifo);
-        if(tx_fifo_used(txfifo))
-            return ERROR;
-        for(j=0; j<2; j++)
-        {
-            msg_q = &(g_wlan.netif[i].msg_q[j]);
-            if(msg_num(msg_q))
-                return ERROR;
-        }
-        for(j=0; j<MAX_TCP_SESSION; j++)
-        {
-            msg_q = &(g_wlan.netif[i].tcp_session[j].msg_q);
-            if(msg_num(msg_q))
-                return ERROR;
-        }
-    }
-    return OK;
-}
-
 void wakeup_timer_func(unsigned long data)
 {
-	if ((g_wlan.wlan_trans.sem.count <= 0) && (0 == g_wlan.hw.can_sleep) && (OK == buf_empty()) ) {
-		printkd("timer[3]\n");
+	if ((g_wlan.wlan_trans.sem.count <= 0) &&
+	    (0 == g_wlan.hw.can_sleep) && (OK == buf_empty())) {
+		printkd("timer[2]\n");
 		g_wlan.hw.can_sleep = 1;
 		trans_up();
-        g_wlan.hw.is_timer_set = 0;
 		return;
 	}
-	printkd("timer[2]\n");
-    mod_timer(&(g_wlan.hw.wakeup_timer), jiffies + msecs_to_jiffies(g_wlan.hw.wakeup_time));
-    g_wlan.hw.is_timer_set = 1;
+	printkd("timer[1]\n");
+	mod_timer(&(g_wlan.hw.wakeup_timer),
+		  jiffies + msecs_to_jiffies(g_wlan.hw.wakeup_time));
 }
 
 int wlan_rx(rxfifo_t *rx_fifo, int cnt)
@@ -602,7 +711,7 @@ void thread_sleep_policy(wlan_thread_t *thread)
 {
 	if (thread->null_run > thread->max_null_run) {
 		usleep_range(thread->idle_sleep - 50, thread->idle_sleep + 50);
-		/*thread->null_run = 0;*/
+		/*thread->null_run = 0; */
 	}
 	return;
 }
@@ -702,8 +811,6 @@ static int wlan_core_thread(void *data)
 			}
 
 		}
-		if (g_wlan.sync.exit)
-			break;
 
 		if (done > 0)
 			thread->null_run = 0;
@@ -711,11 +818,13 @@ static int wlan_core_thread(void *data)
 			thread->null_run++;
 		if (ack_retry != 1)
 			core_try_down(retry);
+		if (g_wlan.wlan_core.exit_flag)
+			break;
 
 	} while (!kthread_should_stop());
 
 	printke("%s exit!\n", __func__);
-	up(&(g_wlan.sync.sem));
+	atomic_set(&(g_wlan.wlan_core.exit_status), 1);
 	return 0;
 }
 
@@ -737,6 +846,19 @@ static int check_valid_chn(int flag, unsigned short status,
 		}
 	}
 	return index;
+}
+
+static void sdio_info_dump(void)
+{
+	int ret;
+	unsigned short chn = 0;
+	ret = sdio_chn_status(0xFF, &chn);
+	if (0 == ret)
+		printke("[sdio_chn_info][0x%x][gpio][%d]\n", chn,
+			gpio_get_value(g_wlan.hw.rx_gpio));
+	else
+		printke("sdio_chn_status error:%d\n", ret);
+	return;
 }
 
 static int wlan_trans_thread(void *data)
@@ -795,28 +917,17 @@ RX:
 		}
 		wlan_wakeup();
 		ret = set_marlin_wakeup(0, 1);
-
-	#if 0
 		if (0 != ret) {
-			printke("rx call set_marlin_wakeup error:%d\n", ret);
-			if (ret != -ETIMEDOUT)
-				msleep(200);
-			goto TX;
-		}
-	#endif
-
-		if (0 != ret) {
-			if( (ITM_NONE_MODE != g_wlan.netif[0].mode) || (ITM_NONE_MODE != g_wlan.netif[1].mode) )	
-			{
-				if(-2 != ret)
-				{
-					printke("rx call set_marlin_wakeup return:%d:%d\n", ret);
+			if ((ITM_NONE_MODE != g_wlan.netif[0].mode)
+			    || (ITM_NONE_MODE != g_wlan.netif[1].mode)) {
+				if (-2 != ret) {
+					printke
+					    ("rx call set_marlin_wakeup return:%d:%d\n",
+					     ret);
 					msleep(200);
 					goto TX;
 				}
-			}
-			else
-			{
+			} else {
 				printke("rx retry open wlan\n", ret);
 				msleep(200);
 				goto TX;
@@ -842,6 +953,7 @@ RX_SLEEP:
 					printke
 					    ("[SDIO_RX_CHN][TIMEOUT][%lu] jiffies:%lu\n",
 					     rx_chn->timeout_time, jiffies);
+					sdio_info_dump();
 					msleep(300);
 					rx_chn->timeout_flag = false;
 				}
@@ -882,28 +994,20 @@ TX:
 				continue;
 			wlan_wakeup();
 			ret = set_marlin_wakeup(0, 1);
-	#if 0
 			if (0 != ret) {
-				printke("tx call set_marlin_wakeup error:%d\n",
-					ret);
-				if (ret != -ETIMEDOUT)
-					msleep(200);
-				retry++;
-				continue;
-			}
-	#endif
-
-			if (0 != ret) {
-				if( (ITM_NONE_MODE != g_wlan.netif[0].mode) || (ITM_NONE_MODE != g_wlan.netif[1].mode) )	
-				{
+				if ((ITM_NONE_MODE != g_wlan.netif[0].mode)
+				    || (ITM_NONE_MODE !=
+					g_wlan.netif[1].mode)) {
 					// -2: means bt ack high
-					if(-2 != ret){
-						printke("tx call set_marlin_wakeup return:%d\n", ret);
+					if (-2 != ret) {
+						printke
+						    ("tx call set_marlin_wakeup return:%d\n",
+						     ret);
 						msleep(200);
 						retry++;
 						continue;
 					}
-				}else{
+				} else {
 					printke("tx retry open wlan\n");
 					msleep(300);
 					retry++;
@@ -922,8 +1026,7 @@ TX:
 TX_SLEEP:
 				if (false == tx_chn->timeout_flag) {
 					tx_chn->timeout_flag = true;
-					tx_chn->timeout =
-					    jiffies +
+					tx_chn->timeout = jiffies +
 					    msecs_to_jiffies(tx_chn->
 							     timeout_time);
 				} else {
@@ -933,6 +1036,16 @@ TX_SLEEP:
 						    ("[SDIO_TX_CHN][TIMEOUT][%lu] jiffies:%lu\n",
 						     tx_chn->timeout_time,
 						     jiffies);
+						sdio_info_dump();
+						tx_chn->chn_timeout_cnt++;
+						if (tx_chn->chn_timeout_cnt >
+						    10) {
+							printke
+							    ("[SDIO_TX_CHN][ERROR][block time more than 6s][need reset CP2]\n");
+							//mdbg_assert_interface();
+							tx_chn->
+							    chn_timeout_cnt = 0;
+						}
 						msleep(300);
 						tx_chn->timeout_flag = false;
 					}
@@ -940,8 +1053,10 @@ TX_SLEEP:
 				retry++;
 				continue;
 			}
-			if (true == tx_chn->timeout_flag) {
+			if ((true == tx_chn->timeout_flag)
+			    || (tx_chn->chn_timeout_cnt > 0)) {
 				tx_chn->timeout_flag = false;
+				tx_chn->chn_timeout_cnt = 0;
 			}
 			ret =
 			    tx_fifo_out(vif_id, index, tx_fifo, hw_tx,
@@ -957,16 +1072,6 @@ TX_SLEEP:
 			core_try_up();
 		}
 
-		if (g_wlan.sync.exit) {
-/*
-			if(1 == wake_flag)
-			{
-				wake_unlock(&g_wlan.hw.wlan_lock);
-				wake_flag = 0;
-			}
-*/
-			break;
-		}
 		gpio_status = gpio_get_value(rx_gpio);
 		if (gpio_status) {
 			if (g_wlan.wlan_trans.sem.count - done <= 1) {
@@ -984,23 +1089,18 @@ TX_SLEEP:
 		else
 			thread->null_run++;
 		wlan_sleep();
-/*
-		if ((done >= g_wlan.wlan_trans.sem.count) && (wake_flag = 1) &&(!gpio_status) )
-		{
-			wake_unlock(&g_wlan.hw.wlan_lock);
-			wake_flag = 0;
-		}
-*/
 		for (i = 0; i < done; i++) {
 			trans_down();
 		}
+		if (g_wlan.wlan_trans.exit_flag)
+			break;
 	} while (!kthread_should_stop());
 	sdiodev_readchn_uninit(8);
 	sdiodev_readchn_uninit(9);
 	mdbg_sdio_read();
 	del_timer_sync(&(g_wlan.hw.wakeup_timer));
 	printke("%s exit\n", __func__);
-	up(&(g_wlan.sync.sem));
+	atomic_set(&(g_wlan.wlan_trans.exit_status), 1);
 	core_up();
 	return OK;
 }
@@ -1104,16 +1204,16 @@ static int wlan_hw_init(hw_info_t *hw)
 	init_timer(&g_wlan.hw.wakeup_timer);
 	g_wlan.hw.wakeup_timer.function = wakeup_timer_func;
 	g_wlan.hw.wakeup_time = 1500;
-    g_wlan.hw.suspend = 0;
+	g_wlan.hw.suspend = 0;
 	return OK;
 }
 
 static int send_arp(char vif_id, char *mac, char *ip)
 {
-	int              len;
-	struct sk_buff  *skb;
-	msg_q_t         *msg_q;
-	tx_msg_t         msg = {0};
+	int len;
+	struct sk_buff *skb;
+	msg_q_t *msg_q;
+	tx_msg_t msg = { 0 };
 	unsigned char arp_hex[] = {
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x40, 0x45, 0xda,
 		0x75, 0xe4, 0x76, 0x08, 0x06, 0x00, 0x01, 0x08, 0x00,
@@ -1121,22 +1221,22 @@ static int send_arp(char vif_id, char *mac, char *ip)
 		0x76, 0xc0, 0xa8, 0x01, 0x9c, 0x00, 0x00, 0x00, 0x00,
 		0x00, 0x00, 0xc0, 0xa8, 0x01, 0x01
 	};
-	memcpy(&(arp_hex[6]),  mac,    6);
-	memcpy(&(arp_hex[22]), mac,    6);
-	memcpy(&(arp_hex[28]), ip,     4);
-	memcpy(&(arp_hex[38]), ip,     4);
+	memcpy(&(arp_hex[6]), mac, 6);
+	memcpy(&(arp_hex[22]), mac, 6);
+	memcpy(&(arp_hex[28]), ip, 4);
+	memcpy(&(arp_hex[38]), ip, 4);
 	arp_hex[41] = 0x01;
 	len = sizeof(arp_hex);
 	skb = dev_alloc_skb(len + NET_IP_ALIGN);
 	skb_reserve(skb, NET_IP_ALIGN);
-	memcpy(skb->data,   (char *)&(arp_hex[0]),  len);
+	memcpy(skb->data, (char *)&(arp_hex[0]), len);
 	skb_put(skb, len);
 	msg.p = (void *)skb;
 	msg.slice[0].data = skb->data;
-	msg.slice[0].len  = skb->len;
-	msg.hdr.mode      = vif_id;
-	msg.hdr.type      = HOST_SC2331_PKT;
-	msg.hdr.subtype   = 0;
+	msg.slice[0].len = skb->len;
+	msg.hdr.mode = vif_id;
+	msg.hdr.type = HOST_SC2331_PKT;
+	msg.hdr.subtype = 0;
 	msg.hdr.len = skb->len;
 	msg_q = &(g_wlan.netif[vif_id].msg_q[1]);
 	msg_q_in(msg_q, &msg);
@@ -1177,7 +1277,7 @@ static int wlan_inetaddr_event(struct notifier_block *this,
 		wlan_cmd_get_ip(vif_id, (u8 *) &ifa->ifa_address);
 		if (vif_id == NETIF_1_ID)
 			send_arp(vif_id, (char *)&(dev->dev_addr[0]),
-				(char *) &ifa->ifa_address);
+				 (char *)&ifa->ifa_address);
 		break;
 	case NETDEV_DOWN:
 		printkd("inetaddr DOWN event is comming in  !\n");
@@ -1218,9 +1318,58 @@ static ssize_t wlan_proc_write(struct file *file, const char __user *buffer,
 	return count;
 }
 
+static int wlan_proc_open(struct inode *inode, struct file *filp)
+{
+	return 0;
+}
+
+static int wlan_proc_release(struct inode *inode, struct file *filp)
+{
+	return 0;
+}
+
+static int wlan_proc_ioctl(struct file *filp,
+			   unsigned int cmd, unsigned long arg)
+{
+	int ret;
+	unsigned char r_buf[128] = { 0 };
+	unsigned char s_buf[32] = { 0 };
+	printkd("[%s][cmd][%d]\n", __func__, cmd);
+	if (copy_from_user(r_buf, (unsigned char *)arg, 32)) {
+		printke("[%s][err]\n", __func__);
+		return -EFAULT;
+	}
+	switch (cmd) {
+	case 0x10:
+		g_wlan.sync.cp2_status = 2;
+		g_wlan.sync.exit = 1;
+		g_wlan.cmd.wakeup = 1;
+		wake_up(&g_wlan.cmd.waitQ);
+		wiphy_rfkill_set_hw_state(g_wlan.wiphy, 1);
+		wlan_thread_exit();
+		printke("[CP2][ASSERT]\n");
+		if (2 != g_wlan.sync.drv_status)
+			break;
+		ret = 0x11;
+		memcpy(&s_buf[0], (unsigned char *)(&ret), 4);
+		ret = copy_to_user((unsigned char *)arg, &s_buf[0], 4);
+		if (0 != ret) {
+			printkd("[%s][%d][err]\n", __func__, __LINE__);
+			return -EFAULT;
+		}
+		break;
+	default:
+		break;
+	}
+	return 0;
+}
+
 static const struct file_operations wlan_proc_fops = {
 	.owner = THIS_MODULE,
 	.write = wlan_proc_write,
+	.unlocked_ioctl = wlan_proc_ioctl,
+	.open = wlan_proc_open,
+	.release = wlan_proc_release,
 };
 
 static const struct file_operations lte_concur_proc_fops = {
@@ -1246,10 +1395,12 @@ int wlan_module_init(struct device *dev)
 	} else {
 		printke("sdio is ready !!!\n");
 	}
+	g_wlan.sync.cp2_status = 0;
+	g_wlan.sync.drv_status = 0;
 	marlin_pa_enable(true);
 
 	memset((unsigned char *)(&g_wlan), 0, sizeof(wlan_info_t));
-	g_wlan.version = 0x29;
+	g_wlan.version = 0x30;
 	g_wlan.dev = dev;
 	g_wlan.netif[NETIF_0_ID].id = NETIF_0_ID;
 	g_wlan.netif[NETIF_1_ID].id = NETIF_1_ID;
@@ -1269,9 +1420,15 @@ int wlan_module_init(struct device *dev)
 	if (OK != ret)
 		return -EPERM;
 	wlan_cmd_init();
+
 	sema_init(&g_wlan.wlan_trans.sem, 0);
 	sema_init(&g_wlan.wlan_core.sem, 0);
 
+	atomic_set(&g_wlan.wlan_trans.exit_status, 0);
+	atomic_set(&g_wlan.wlan_core.exit_status, 0);
+
+	g_wlan.wlan_trans.exit_flag = 0;
+	g_wlan.wlan_core.exit_flag = 0;
 	ret = wlan_wiphy_new(&(g_wlan));
 	if (OK != ret)
 		return -EPERM;
@@ -1289,17 +1446,16 @@ int wlan_module_init(struct device *dev)
 
 	g_wlan.wlan_trans.task =
 	    kthread_create(wlan_trans_thread, (void *)(dev), "wlan_trans");
-	if (NULL != g_wlan.wlan_trans.task) {
+	if (NULL != g_wlan.wlan_trans.task)
 		wake_up_process(g_wlan.wlan_trans.task);
-	}
 	down(&(g_wlan.sync.sem));
 
 	g_wlan.wlan_core.task =
 	    kthread_create(wlan_core_thread, (void *)(dev), "wlan_core");
-	if (NULL != g_wlan.wlan_core.task) {
+	if (NULL != g_wlan.wlan_core.task)
 		wake_up_process(g_wlan.wlan_core.task);
-	}
 	down(&(g_wlan.sync.sem));
+
 	wlan_nl_init();
 
 	g_wlan.hw.early_suspend.suspend = wlan_early_suspend;
@@ -1319,6 +1475,8 @@ int wlan_module_init(struct device *dev)
 	}
 	g_dbg = 0x0;
 	SET_BIT(g_dbg, 1);
+	g_wlan.sync.drv_status = 1;
+	g_wlan.sync.cp2_status = 1;
 	printke("%s ok!\n", __func__);
 	return OK;
 }
@@ -1328,17 +1486,24 @@ EXPORT_SYMBOL_GPL(wlan_module_init);
 int wlan_module_exit(struct device *dev)
 {
 	printke("%s enter\n", __func__);
+	g_wlan.sync.drv_status = 2;
 	unregister_inetaddr_notifier(&itm_inetaddr_cb);
 	marlin_pa_enable(false);
-	if (ITM_NONE_MODE != g_wlan.netif[NETIF_0_ID].mode)
-		wlan_cmd_mac_close(NETIF_0_ID, g_wlan.netif[NETIF_0_ID].mode);
-	if (ITM_NONE_MODE != g_wlan.netif[NETIF_1_ID].mode)
-		wlan_cmd_mac_close(NETIF_1_ID, g_wlan.netif[NETIF_1_ID].mode);
+	if (1 == g_wlan.sync.cp2_status) {
+		if (ITM_NONE_MODE != g_wlan.netif[NETIF_0_ID].mode)
+			wlan_cmd_mac_close(NETIF_0_ID,
+					   g_wlan.netif[NETIF_0_ID].mode);
+		if (ITM_NONE_MODE != g_wlan.netif[NETIF_1_ID].mode)
+			wlan_cmd_mac_close(NETIF_1_ID,
+					   g_wlan.netif[NETIF_1_ID].mode);
+	} else {
+		g_wlan.sync.exit = 1;
+		g_wlan.cmd.wakeup = 1;
+		wake_up(&g_wlan.cmd.waitQ);
+	}
+
 	g_wlan.sync.exit = 1;
-	core_up();
-	down(&(g_wlan.sync.sem));
-	trans_up();
-	down(&(g_wlan.sync.sem));
+	wlan_thread_exit();
 	wlan_vif_free(&(g_wlan.netif[NETIF_0_ID]));
 	wlan_vif_free(&(g_wlan.netif[NETIF_1_ID]));
 	wlan_wiphy_free(&g_wlan);
@@ -1353,17 +1518,19 @@ int wlan_module_exit(struct device *dev)
 	remove_proc_entry("lte_concur", NULL);
 	unregister_early_suspend(&g_wlan.hw.early_suspend);
 	wake_lock_destroy(&g_wlan.hw.wlan_lock);
+	g_wlan.sync.drv_status = 3;
 	printke("%s ok!\n", __func__);
 	return OK;
 }
+
 EXPORT_SYMBOL_GPL(wlan_module_exit);
 
-static int  sprd_wlan_probe(struct platform_device *pdev)
+static int sprd_wlan_probe(struct platform_device *pdev)
 {
 	return wlan_module_init(&(pdev->dev));
 }
 
-static int  sprd_wlan_remove(struct platform_device *pdev)
+static int sprd_wlan_remove(struct platform_device *pdev)
 {
 	return wlan_module_exit(&(pdev->dev));
 }
@@ -1388,7 +1555,7 @@ static int sprd_wlan_init(void)
 	return platform_driver_register(&(sprd_wlan_driver));
 }
 
-static void  sprd_wlan_exit(void)
+static void sprd_wlan_exit(void)
 {
 	platform_driver_unregister(&sprd_wlan_driver);
 	platform_device_unregister(sprd_wlan_device);

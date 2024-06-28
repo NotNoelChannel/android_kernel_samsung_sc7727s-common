@@ -96,19 +96,59 @@ out:
 	return ret;
 }
 
+int tx_fifo_check(txfifo_t *fifo, tx_big_hdr_t *big_hdr,
+		  unsigned int total_len)
+{
+	int i, t, len;
+	t_msg_hdr_t *hdr1, *hdr2;
+
+	if (big_hdr->msg_num > fifo->max_msg_num) {
+		printke("[%s][big_hdr:0x%x][%d]\n", __func__, big_hdr,
+			big_hdr->msg_num);
+		return ERROR;
+	}
+	hdr2 = (t_msg_hdr_t *) (big_hdr + 1);
+	len = sizeof(tx_big_hdr_t);
+	for (i = 0; i < big_hdr->msg_num; i++) {
+		hdr1 = &(big_hdr->msg[i]);
+		if (0 !=
+		    memcmp((char *)hdr1, (char *)hdr2, sizeof(t_msg_hdr_t))) {
+			printke("[%s][big_hdr:0x%x][0x%x][0x%x]\n", __func__,
+				big_hdr, hdr1, hdr2);
+			return ERROR;
+		}
+		if ((hdr1->type > 2) || (hdr1->subtype >= WIFI_CMD_MAX)
+		    || ((HOST_SC2331_CMD == hdr1->type) && (0 == hdr1->subtype))
+		    || ((HOST_SC2331_PKT == hdr1->type) && (0 == hdr1->len))) {
+			memcpy((char *)&t, (char *)hdr1, 4);
+			printke("[%s][big_hdr:0x%x][msg][0x%x,0x%x]\n",
+				__func__, big_hdr, hdr1, t);
+			return ERROR;
+		}
+		hdr2 = TX_MSG_NEXT_MSG(hdr2);
+		len = len + TX_MSG_UNIT_LEN(hdr1);
+	}
+	if (len != total_len) {
+		printke("[%s][big_hdr:0x%x][len][0x%x,0x%x]\n", __func__,
+			big_hdr, len, total_len);
+		return ERROR;
+	}
+	return OK;
+}
+
 int tx_fifo_out(const unsigned char netif_id, const unsigned chn,
 		txfifo_t *fifo, P_FUNC_1 pfunc, unsigned short *count)
 {
 	unsigned int len, num, wt, seq;
-	unsigned char *readTo, *readFrom, *readMax;
+	unsigned char *to, *from, *end;
 	t_msg_hdr_t *hdr;
 	tx_big_hdr_t *big_hdr;
-	int ret = ERROR;
+	int ret = ERROR, fifo_err = ERROR;
 
 restart:
 	wt = fifo->WT;
 	if (fifo->RD == wt) {
-		readMax = fifo->mem + fifo->LASTWT;
+		end = fifo->mem + fifo->LASTWT;
 	} else if (wt < fifo->RD) {
 		if (fifo->RD == fifo->LASTWT) {
 			fifo->RD = 0;
@@ -117,29 +157,35 @@ restart:
 			spin_unlock(&(fifo->lock));
 			goto restart;
 		} else {
-			readMax = fifo->mem + fifo->LASTWT;
+			end = fifo->mem + fifo->LASTWT;
 		}
 	} else {
-		readMax = fifo->mem + wt;
+		end = fifo->mem + wt;
 	}
 
-	readTo = fifo->mem + fifo->RD;
-	readFrom = readTo - sizeof(tx_big_hdr_t);
-	big_hdr = (tx_big_hdr_t *) (readFrom);
+	to = fifo->mem + fifo->RD;
+	from = to - sizeof(tx_big_hdr_t);
+	big_hdr = (tx_big_hdr_t *) (from);
 
 	memset((unsigned char *)big_hdr, 0, sizeof(tx_big_hdr_t));
 	big_hdr->mode = netif_id;
 	len = sizeof(tx_big_hdr_t);
 
 	for (num = 0; num < fifo->max_msg_num; num++) {
-		hdr = (t_msg_hdr_t *) (readTo);
-		if ((unsigned char *)hdr >= readMax)
+		hdr = (t_msg_hdr_t *) (to);
+		if ((unsigned char *)hdr >= end)
 			break;
 		len = len + TX_MSG_UNIT_LEN(hdr);
 		if (len >= fifo->cp2_txRam)
 			break;
-		if ((hdr->type > 2) || (hdr->subtype > 47)) {
-			ASSERT();
+
+		if ((hdr->type > 2) ||
+		    (hdr->subtype >= WIFI_CMD_MAX) ||
+		    ((HOST_SC2331_CMD == hdr->type) && (0 == hdr->subtype)) ||
+		    ((HOST_SC2331_PKT == hdr->type) && (0 == hdr->len))
+		    ) {
+			fifo_err = OK;
+			printke("[%s][msg err]\n", __func__);
 			break;
 		}
 		if (HOST_SC2331_PKT == hdr->type) {
@@ -149,38 +195,53 @@ restart:
 			printkp("[CMD_OUT][%s]\n", get_cmd_name(hdr->subtype));
 		} else {
 		}
-		memcpy((unsigned char *)(&(big_hdr->msg[num])), readTo,
+		memcpy((unsigned char *)(&(big_hdr->msg[num])), to,
 		       sizeof(t_msg_hdr_t));
 		big_hdr->msg_num++;
 		hdr = TX_MSG_NEXT_MSG(hdr);
-		readTo = (unsigned char *)hdr;
+		to = (unsigned char *)hdr;
 	}
 	*count = num;
-	len = readTo - readFrom;
+	len = to - from;
 	big_hdr->len = len;
 
 	if (len >= (sizeof(tx_big_hdr_t) + sizeof(t_msg_hdr_t))) {
-		ret = pfunc(chn, readFrom, len);
+		ret = tx_fifo_check(fifo, (tx_big_hdr_t *) from, len);
+		if (OK != ret) {
+			printke("[%s][big_hdr err]\n", __func__);
+			fifo_err = OK;
+			goto DONE;
+		}
+		ret = pfunc(chn, from, len);
 		if (OK != ret) {
 			ret = HW_WRITE_ERROR;
-			goto out;
+			goto EXIT;
 		} else
 			ret = OK;
 	} else {
+		fifo_err = OK;
 		ASSERT();
 		ret = -5;
 	}
-	if ((fifo->RD > wt) && ((readMax - readTo) < sizeof(t_msg_hdr_t))) {
+
+DONE:
+	if (OK == fifo_err) {
+		to = end;
+		printke("txfifo:0x%x,flush(%d,%d)\n", fifo, fifo->RD,
+			to - fifo->mem);
+	}
+	if ((fifo->RD > wt) && ((end - to) < sizeof(t_msg_hdr_t))) {
 		fifo->RD = 0;
 		fifo->rd_cnt = fifo->rd_cnt + num;
 		spin_lock(&(fifo->lock));
 		fifo->LASTWT = -1;
 		spin_unlock(&(fifo->lock));
 	} else {
-		fifo->RD = readTo - fifo->mem;
+		fifo->RD = to - fifo->mem;
 		fifo->rd_cnt = fifo->rd_cnt + num;
 	}
-out:
+
+EXIT:
 	return ret;
 }
 

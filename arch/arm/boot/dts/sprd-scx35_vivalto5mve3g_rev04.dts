@@ -382,6 +382,10 @@
 	sprd,fb_mem = <0x9f89b000 0x465000>;
 };
 
+&sdhci3 {
+	sdhci-cap2-power-always-on;
+};
+
 &l_sprd_sensor {
 	gpios = <&d_gpio_gpio 186 0   /*reset*/
 			&d_gpio_gpio 188 0    /*main*/

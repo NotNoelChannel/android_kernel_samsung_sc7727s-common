@@ -102,6 +102,7 @@ int wlan_cmd_init(void)
 {
 	wlan_cmd_t *cmd = &(g_wlan.cmd);
 	cmd->mem = kmalloc(WLAN_CMD_MEM_LEN, GFP_KERNEL);
+	atomic_set(&(cmd->refcnt), 0);
 	mutex_init(&(cmd->cmd_lock));
 	mutex_init(&cmd->mem_lock);
 	init_waitqueue_head(&(cmd->waitQ));
@@ -112,13 +113,50 @@ int wlan_cmd_init(void)
 int wlan_cmd_deinit(void)
 {
 	wlan_cmd_t *cmd = &(g_wlan.cmd);
+	int ret;
+	unsigned long timeout;
+
 	if (NULL != cmd->mem) {
 		kfree(cmd->mem);
 		cmd->mem = NULL;
 	}
+
+	cmd->wakeup = 1;
+	wake_up(&cmd->waitQ);
+	timeout = jiffies + msecs_to_jiffies(3000);
+	while (atomic_read(&(cmd->refcnt)) > 0) {
+		if (time_after(jiffies, timeout)) {
+			printkd("[%s][wait cmd lock timeout]\n", __func__);
+			break;
+		}
+		usleep_range(2000, 2500);
+	}
 	mutex_destroy(&(cmd->cmd_lock));
+	mutex_destroy(&(cmd->mem_lock));
+	printkd("[%s][exit]\n", __func__);
 	return OK;
 
+}
+
+int wlan_cmd_lock(wlan_cmd_t *cmd)
+{
+	if (1 == g_wlan.sync.exit)
+		goto ERR;
+	atomic_inc(&(cmd->refcnt));
+	mutex_lock(&(cmd->cmd_lock));
+	if (1 == g_wlan.sync.exit)
+		goto ERR;
+	return OK;
+ERR:
+	printkd("[%s][ERROR]\n", __func__);
+	return ERROR;
+}
+
+int wlan_cmd_unlock(wlan_cmd_t *cmd)
+{
+	mutex_unlock(&(cmd->cmd_lock));
+	atomic_dec(&(cmd->refcnt));
+	return;
 }
 
 static inline void wlan_cmd_clean(void)
@@ -144,6 +182,11 @@ int wlan_cmd_send_to_ic(unsigned char vif_id, unsigned char *data, int len,
 	msg_q_t *msg_q = &(g_wlan.netif[vif_id].msg_q[0]);
 	wlan_cmd_t *cmd = &(g_wlan.cmd);
 
+	if (NULL == cmd->mem) {
+		printkd("[SEND_CMD][%d][%s][ERR][CMD MEM NULL]\n", vif_id,
+			get_cmd_name(subtype));
+		return ERROR;
+	}
 	msg.hdr.mode = vif_id;
 	msg.hdr.type = HOST_SC2331_CMD;
 	msg.hdr.subtype = subtype;
@@ -175,21 +218,21 @@ int wlan_timeout_recv_rsp(unsigned char *r_buf, unsigned short *r_len,
 {
 	int ret;
 	r_msg_hdr_t *msg;
-	wlan_cmd_t  *cmd = &(g_wlan.cmd);
+	wlan_cmd_t *cmd = &(g_wlan.cmd);
 
-	ret =
-	    wait_event_timeout(cmd->waitQ,
-			       ((1 == cmd->wakeup)
-				|| (1 == g_wlan.sync.exit)),
-			       msecs_to_jiffies(timeout));
+	ret = wait_event_timeout(cmd->waitQ, ((1 == cmd->wakeup)
+					      || (1 == g_wlan.sync.exit)),
+				 msecs_to_jiffies(timeout));
 	if (0 == ret) {
 		printke("[%s][%d][err]\n", __func__, __LINE__);
 		cmd->wakeup = 0;
 		return -1;
 	}
+	if (1 == g_wlan.sync.exit)
+		return -1;
 	mutex_lock(&cmd->mem_lock);
 	cmd->wakeup = 0;
-	msg = (r_msg_hdr_t *)(cmd->mem);
+	msg = (r_msg_hdr_t *) (cmd->mem);
 	if (*r_len < msg->len) {
 		printke("[%s][%d][err]\n", __func__, __LINE__);
 		msg->len = *r_len;
@@ -212,21 +255,19 @@ int wlan_cmd_send_recv(unsigned char vif_id, unsigned char *pData, int len,
 			    sizeof(struct wlan_cmd_rsp_state_code)] = { 0 };
 	unsigned short r_len = sizeof(struct wlan_cmd_rsp_state_code);
 
-	msg = (r_msg_hdr_t *)(&r_buf[0]);
-
-	if (1 == g_wlan.sync.exit) {
-		printke("%s, exit flag\n", __func__);
-		return ERROR;
-	}
-
-	mutex_lock(&(cmd->cmd_lock));
-
+	msg = (r_msg_hdr_t *) (&r_buf[0]);
+	ret = wlan_cmd_lock(cmd);
+	if (OK != ret)
+		goto ERR;
 	if ((NULL == pData) || (0 == len))
 		ret = wlan_cmd_send_to_ic(vif_id, NULL, 0, subtype);
 	else
 		ret = wlan_cmd_send_to_ic(vif_id, pData, len, subtype);
-	if (OK != ret)
-		return ERROR;
+
+	if (OK != ret) {
+		wlan_cmd_unlock(cmd);
+		goto ERR;
+	}
 
 	ret = wlan_timeout_recv_rsp(r_buf, &r_len, timeout);
 	if (-1 == ret) {
@@ -240,16 +281,16 @@ int wlan_cmd_send_recv(unsigned char vif_id, unsigned char *pData, int len,
 			get_cmd_name(msg->subtype));
 		ret = -1;
 	}
-	mutex_unlock(&(cmd->cmd_lock));
+	wlan_cmd_unlock(cmd);
 
-	if (-1 == ret) {
-		wlan_cmd_assert(vif_id, 0);
-		return ERROR;
-	}
 	state = (struct wlan_cmd_rsp_state_code *)(&r_buf[sizeof(r_msg_hdr_t)]);
-	if(WIFI_CMD_SET_SCAN == subtype)
+	if (WIFI_CMD_SET_SCAN == subtype)
 		return state->code;
 	return OK;
+ERR:
+	if (2 == g_wlan.sync.cp2_status)
+		return OK;
+	return ERROR;
 }
 
 int wlan_cmd_start_ap(unsigned char vif_id, unsigned char *beacon,
@@ -269,7 +310,7 @@ int wlan_cmd_start_ap(unsigned char vif_id, unsigned char *beacon,
 }
 
 int wlan_cmd_disassoc(unsigned char vif_id, const unsigned char *mac_addr,
-		     unsigned short reason_code)
+		      unsigned short reason_code)
 {
 	int dataLen = 0;
 	struct wlan_cmd_disassoc *ptr = NULL;
@@ -341,10 +382,9 @@ int wlan_cmd_set_ft_ie(unsigned char vif_id, const unsigned char *ies,
 }
 
 int wlan_cmd_set_tx_mgmt(unsigned char vif_id,
-			struct ieee80211_channel *channel,
-			u8 dont_wait_for_ack, unsigned int wait,
-			u64 *cookie, const unsigned char *mac,
-			size_t mac_len)
+			 struct ieee80211_channel *channel,
+			 u8 dont_wait_for_ack, unsigned int wait,
+			 u64 *cookie, const unsigned char *mac, size_t mac_len)
 {
 	unsigned short dataLen;
 	struct wlan_cmd_mgmt_tx_t *mgmt_tx;
@@ -826,7 +866,7 @@ int wlan_cmd_set_cap(unsigned int cap)
 {
 #define WLNPI_CMD_SET_WLAN_CAP (40)
 	int ret;
-	unsigned char  r_buf[512] = {0};
+	unsigned char r_buf[512] = { 0 };
 	unsigned short r_len = 0;
 	struct npi_cmd_hdr *msg;
 	int s_len = 0;
@@ -835,12 +875,12 @@ int wlan_cmd_set_cap(unsigned int cap)
 	msg = (struct npi_cmd_hdr *)s_buff;
 	msg->type = HOST_TO_MARLIN_CMD;
 	msg->subtype = WLNPI_CMD_SET_WLAN_CAP;
-	msg->len = 4;   /*sizeof(unsigned int)*/
+	msg->len = 4;		/*sizeof(unsigned int) */
 	s_len = msg->len + sizeof(struct npi_cmd_hdr);
 	memcpy(s_buff + sizeof(struct npi_cmd_hdr), &cap,
-		   sizeof(unsigned int));
+			sizeof(unsigned int));
 	ret = wlan_cmd_npi_send_recv(s_buff, s_len,
-								 r_buf, &r_len);
+			r_buf, &r_len);
 	printke("[Send wlan capability = 0x%x %s!]\n",
 			cap, ret ? "failed" : "success");
 
@@ -858,15 +898,14 @@ int wlan_cmd_set_psm_cap(void)
  **/
 #define STA_GC_EN_SLEEP		(0x3)
 #define STA_GC_NO_SLEEP		(0x0)
-	struct file  *fp = 0;
-	mm_segment_t  fs;
-	loff_t       *pos;
+	struct file *fp = 0;
+	mm_segment_t fs;
+	loff_t *pos;
 	unsigned int flag = 0;
 	unsigned char file_data;
 
 	fp = filp_open(PSM_PATH, O_RDONLY, 0);
 	if (IS_ERR(fp)) {
-		printke("/data/.psm.info file is not exist\n");
 		flag = STA_GC_EN_SLEEP;
 		goto OUT;
 	}
@@ -886,7 +925,7 @@ int wlan_cmd_set_psm_cap(void)
 OUT:
 	printke("[%s psm is:%s]\n", __func__,
 			flag ? "normal mode" : "rf mode");
-	/*set_wlan_cap*/
+	/*set_wlan_cap */
 	return wlan_cmd_set_cap(flag);
 }
 #endif
@@ -910,11 +949,9 @@ int wlan_cmd_get_rssi(unsigned char vif_id, unsigned char *signal,
 	unsigned char r_buf[sizeof(r_msg_hdr_t) + 8] = { 0 };
 	unsigned short r_len = 8;
 	msg = (r_msg_hdr_t *) (&r_buf[0]);
-	if (1 == g_wlan.sync.exit) {
-		printke("%s, exit flag\n", __func__);
+	ret = wlan_cmd_lock(cmd);
+	if (OK != ret)
 		return ERROR;
-	}
-	mutex_lock(&(cmd->cmd_lock));
 	ret = wlan_cmd_send_to_ic(vif_id, NULL, 0, WIFI_CMD_GET_RSSI);
 	ret = wlan_timeout_recv_rsp(r_buf, &r_len, CMD_WAIT_TIMEOUT);
 	if (-1 == ret) {
@@ -934,11 +971,10 @@ int wlan_cmd_get_rssi(unsigned char vif_id, unsigned char *signal,
 		*noise =
 		    (unsigned char)((le32_to_cpu(*rssi) | 0x0000ffff) >> 16);
 	}
-	mutex_unlock(&(cmd->cmd_lock));
+	wlan_cmd_unlock(cmd);
 	return OK;
 err:
-	wlan_cmd_assert(vif_id, 3);
-	mutex_unlock(&(cmd->cmd_lock));
+	wlan_cmd_unlock(cmd);
 	return ERROR;
 }
 
@@ -951,35 +987,38 @@ int wlan_cmd_get_txrate_txfailed(unsigned char vif_id, unsigned int *rate,
 	unsigned char r_buf[sizeof(r_msg_hdr_t) + 12] = { 0 };
 	unsigned short r_len = 12;
 	msg = (r_msg_hdr_t *) (&r_buf[0]);
-	if (1 == g_wlan.sync.exit) {
-		printke("%s, exit flag\n", __func__);
+	ret = wlan_cmd_lock(cmd);
+	if (OK != ret) {
+		if (2 == g_wlan.sync.cp2_status)
+			return OK;
 		return ERROR;
 	}
-	mutex_lock(&(cmd->cmd_lock));
 	ret =
 	    wlan_cmd_send_to_ic(vif_id, NULL, 0, WIFI_CMD_GET_TXRATE_TXFAILED);
 	ret = wlan_timeout_recv_rsp(r_buf, &r_len, CMD_WAIT_TIMEOUT);
 	if (-1 == ret) {
 		printke("[SEND_CMD %s %d ERROR][rsp timeout]\n",
 			get_cmd_name(WIFI_CMD_GET_TXRATE_TXFAILED), vif_id);
-		goto err;
+		goto ERR;
 	}
 	if ((SC2331_HOST_RSP != msg->type)
 	    || (WIFI_CMD_GET_TXRATE_TXFAILED != msg->subtype)) {
 		printke("[SEND_CMD %s %d ERROR][rsp match %s]\n",
 			get_cmd_name(WIFI_CMD_GET_TXRATE_TXFAILED), vif_id,
 			get_cmd_name(msg->subtype));
-		goto err;
+		goto ERR;
 	} else {
 		memcpy((unsigned char *)rate, &r_buf[sizeof(r_msg_hdr_t) + 4],
 		       4);
 		memcpy((unsigned char *)failed, &r_buf[sizeof(r_msg_hdr_t) + 8],
 		       4);
 	}
-	mutex_unlock(&(cmd->cmd_lock));
+	wlan_cmd_unlock(cmd);
 	return OK;
-err:
-	mutex_unlock(&(cmd->cmd_lock));
+ERR:
+	wlan_cmd_unlock(cmd);
+	if (2 == g_wlan.sync.cp2_status)
+		return OK;
 	return ERROR;
 }
 
@@ -1009,21 +1048,17 @@ int wlan_cmd_npi_send_recv(unsigned char *s_buf, unsigned short s_len,
 	s_data = kmalloc(s_len, GFP_KERNEL);
 	memcpy(s_data, s_buf, s_len);
 
-	mutex_lock(&(cmd->cmd_lock));
+	ret = wlan_cmd_lock(cmd);
+	if (OK != ret)
+		return ERROR;
 	ret = wlan_cmd_send_to_ic(0, s_data, s_len, WIFI_CMD_NPI_MSG);
-	if (1 == g_wlan.sync.exit) {
-		printke("%s, exit flag\n", __func__);
-		goto err;
-	}
-	ret =
-	    wait_event_timeout(cmd->waitQ,
-			       ((1 == cmd->wakeup)
-				|| (1 == g_wlan.sync.exit)),
-			       msecs_to_jiffies(5000));
+	ret = wait_event_timeout(cmd->waitQ, ((1 == cmd->wakeup)
+					      || (1 == g_wlan.sync.exit)),
+				 msecs_to_jiffies(5000));
 	cmd->wakeup = 0;
 	if (0 == ret) {
 		printke("%s(), wait timeout\n", __func__);
-		goto err;
+		goto ERR;
 	}
 	msg = (r_msg_hdr_t *) cmd->mem;
 	if ((SC2331_HOST_RSP == msg->type)
@@ -1036,23 +1071,20 @@ int wlan_cmd_npi_send_recv(unsigned char *s_buf, unsigned short s_len,
 		printke("[%s] rsp not match, rsp:[%s]\n",
 			get_cmd_name(WIFI_CMD_NPI_MSG),
 			get_cmd_name(msg->subtype));
-		goto err;
+		goto ERR;
 	}
-	mutex_unlock(&(cmd->cmd_lock));
+	wlan_cmd_unlock(cmd);
 	printkd("%s cmd ok!\n", get_cmd_name(WIFI_CMD_NPI_MSG));
 	return OK;
-err:
-	mutex_unlock(&(cmd->cmd_lock));
-	printke(" ################### %s(), ERROR  ####################\n",
-		get_cmd_name(WIFI_CMD_NPI_MSG));
-	g_dbg = 0xffffffff;
+ERR:
+	wlan_cmd_unlock(cmd);
+	printke("[%s][ERROR]\n", get_cmd_name(WIFI_CMD_NPI_MSG));
 	return ERROR;
-
 }
 
 int wlan_rx_rsp_process(const unsigned char vif_id, r_msg_hdr_t *msg)
 {
-	wlan_cmd_t  *cmd = &(g_wlan.cmd);
+	wlan_cmd_t *cmd = &(g_wlan.cmd);
 
 	if (mutex_trylock(&cmd->mem_lock)) {
 		printkd("[RECV_RSP][%d][%s][%d][%d]\n", vif_id,

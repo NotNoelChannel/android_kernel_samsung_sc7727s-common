@@ -366,7 +366,7 @@ static int wlan_cfg80211_remain_on_channel(struct wiphy *wiphy,
 	printkd("[%s][%d] enter\n", __func__, vif_id);
 	memcpy(&global_channel, channel, sizeof(struct ieee80211_channel));
 	global_cookie = *cookie;
-
+	printkd("remain on channel duration is %d\n", duration);
 	/* send remain chan */
 	ret =
 	    wlan_cmd_remain_chan(vif_id, channel, channel_type, duration,
@@ -672,7 +672,8 @@ static int itm_wlan_add_cipher_key(wlan_vif_t *vif, bool pairwise,
 				   const unsigned char *key_seq,
 				   const unsigned char *macaddr)
 {
-	unsigned char pn_key[16] = { 0x5c, 0x36, 0x5c, 0x36, 0x5c, 0x36, 0x5c, 0x36,
+	unsigned char pn_key[16] = {
+		0x5c, 0x36, 0x5c, 0x36, 0x5c, 0x36, 0x5c, 0x36,
 		0x5c, 0x36, 0x5c, 0x36, 0x5c, 0x36, 0x5c, 0x36
 	};
 	int ret;
@@ -790,7 +791,7 @@ static int wlan_cfg80211_scan(struct wiphy *wiphy,
 	case NL80211_IFTYPE_AP:
 		break;
 		/*      case NL80211_IFTYPE_P2P_CLIENT:
-	case NL80211_IFTYPE_P2P_GO:
+		   case NL80211_IFTYPE_P2P_GO:
 		 */
 	case NL80211_IFTYPE_STATION:
 		break;
@@ -861,6 +862,11 @@ static int wlan_cfg80211_scan(struct wiphy *wiphy,
 	}
 	channels[0] = j;
 
+	/* Arm scan timeout timer */
+	mod_timer(&vif->cfg80211.scan_timeout,
+		  jiffies + ITM_SCAN_TIMER_INTERVAL_MS * HZ / 1000);
+	vif->cfg80211.scan_request = request;
+
 	ret = wlan_cmd_scan(vif_id, data, channels, scan_ssids_len);
 	if (ret) {
 		printkd("wlan_cmd_scan failed with ret %d\n", ret);
@@ -871,10 +877,6 @@ static int wlan_cfg80211_scan(struct wiphy *wiphy,
 	if (vif->cfg80211.scan_done_lock.link.next == LIST_POISON1 ||
 	    vif->cfg80211.scan_done_lock.link.prev == LIST_POISON2)
 		wake_lock(&vif->cfg80211.scan_done_lock);
-	/* Arm scan timeout timer */
-	mod_timer(&vif->cfg80211.scan_timeout,
-		  jiffies + ITM_SCAN_TIMER_INTERVAL_MS * HZ / 1000);
-	vif->cfg80211.scan_request = request;
 	kfree(data);
 	printkd("%s(), ok!\n", __func__);
 	return 0;
@@ -1154,13 +1156,12 @@ static int wlan_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 	/* Set channel */
 	if (sme->channel != NULL) {
 		printkd("Settting channel to %d\n",
-			ieee80211_frequency_to_channel(sme->channel->
-						       center_freq));
+			ieee80211_frequency_to_channel(sme->
+						       channel->center_freq));
 		ret =
 		    wlan_cmd_set_channel(vif_id,
-					 ieee80211_frequency_to_channel(sme->
-									channel->
-									center_freq));
+					 ieee80211_frequency_to_channel
+					 (sme->channel->center_freq));
 		if (ret < 0) {
 			printkd("wlan_cmd_set_channel failed with ret %d\n",
 				ret);
@@ -1622,6 +1623,42 @@ out:
 	return;
 }
 
+void cfg80211_unlink_ssid(unsigned char vif_id, unsigned char *bssid, unsigned char *ssid, int ssid_len)
+{
+		int i;
+		struct cfg80211_bss *bss = NULL;
+		struct wiphy *wiphy = NULL;
+		wlan_vif_t *vif;
+		buf_scan_frame_t *scan_buf;
+
+		vif = id_to_vif(vif_id);
+		wiphy = vif->wdev.wiphy;
+		bss = cfg80211_get_bss(wiphy, NULL,bssid,ssid,ssid_len,WLAN_CAPABILITY_ESS,WLAN_CAPABILITY_ESS);
+		if(bss)
+		{
+			cfg80211_unlink_bss(wiphy, bss);
+			vif->beacon_loss = 0;
+			printkd("[%s][unlink][%s]\n",__func__, ssid);
+		}
+		for (i = 0; i < MAX_SCAN_FRAME_BUF_NUM; i++)
+		{
+			scan_buf = (buf_scan_frame_t *) (vif->
+						  cfg80211.scan_frame_array +
+						  i * sizeof(buf_scan_frame_t));
+			if (0xff != scan_buf->live)
+				continue;
+			if (0 != memcmp(bssid, scan_buf->bssid, 6))
+				continue;
+			if(ssid_len != strlen(scan_buf->ssid) )
+				continue;
+			if( 0 != strncmp(ssid, scan_buf->ssid, ssid_len) )
+				continue;
+			memset((char *)(scan_buf), 0, sizeof(buf_scan_frame_t) );
+			printkd("[%s][clear][%s]\n",__func__, ssid);
+			break;
+		}
+		return;
+}
 void cfg80211_report_disconnect_done(unsigned char vif_id, unsigned char *pData,
 				     int len)
 {
@@ -1630,6 +1667,9 @@ void cfg80211_report_disconnect_done(unsigned char vif_id, unsigned char *pData,
 	bool found = false;
 	wlan_vif_t *vif = id_to_vif(vif_id);
 	printkd("%s()\n", __func__);
+
+	cfg80211_unlink_ssid(vif_id, vif->cfg80211.bssid, vif->cfg80211.ssid, vif->cfg80211.ssid_len );
+
 	/* This should filled if disconnect reason is not only one */
 	memcpy(&reason_code, pData, 2);
 	if (vif->cfg80211.scan_request
@@ -1665,9 +1705,7 @@ void cfg80211_report_disconnect_done(unsigned char vif_id, unsigned char *pData,
 				} else {
 					found = false;
 				}
-			}
-			while (found)
-				;
+			} while (found);
 		}
 		cfg80211_disconnected(vif->ndev, reason_code,
 				      NULL, 0, GFP_KERNEL);
@@ -1795,7 +1833,7 @@ void cfg80211_report_scan_done(unsigned char vif_id, unsigned char *pData,
 			continue;
 		}
 		signal = rssi;
-		/*printkd("[report][%s][%d][%d]\n",ssid, channel_num, signal);*/
+		/*printkd("[report][%s][%d][%d]\n",ssid, channel_num, signal); */
 		itm_bss =
 		    cfg80211_inform_bss_frame(wiphy, channel, mgmt,
 					      le16_to_cpu(mgmt_len), signal,
@@ -1880,11 +1918,11 @@ void cfg80211_report_scan_frame(unsigned char vif_id, unsigned char *pData,
 		msa = (unsigned char *)(event + 1);
 		get_ssid(msa, ssid);
 		get_bssid(msa, bssid);
-		if (0 == strlen(ssid)) {
-			printkd("[%s %d][line %d err]\n", __func__, vif_id,
-				__LINE__);
-			return;
-		}
+		/*if (0 == strlen(ssid)) {
+		   printkd("[%s %d][line %d err]\n", __func__, vif_id,
+		   __LINE__);
+		   return;
+		   } */
 		if (1024 < event->frame_len) {
 			printkd("[%s %d][line %d err]\n", __func__, vif_id,
 				__LINE__);
@@ -1892,8 +1930,8 @@ void cfg80211_report_scan_frame(unsigned char vif_id, unsigned char *pData,
 		}
 		for (i = 0; i < MAX_SCAN_FRAME_BUF_NUM; i++) {
 			scan_buf =
-			    (buf_scan_frame_t *) (vif->cfg80211.
-						  scan_frame_array +
+			    (buf_scan_frame_t *) (vif->
+						  cfg80211.scan_frame_array +
 						  i * sizeof(buf_scan_frame_t));
 			if (0xff != scan_buf->live)
 				continue;
@@ -1910,8 +1948,8 @@ void cfg80211_report_scan_frame(unsigned char vif_id, unsigned char *pData,
 		}
 		for (i = 0; i < MAX_SCAN_FRAME_BUF_NUM; i++) {
 			scan_buf =
-			    (buf_scan_frame_t *) (vif->cfg80211.
-						  scan_frame_array +
+			    (buf_scan_frame_t *) (vif->
+						  cfg80211.scan_frame_array +
 						  i * sizeof(buf_scan_frame_t));
 			if (0xff == scan_buf->live)
 				continue;
@@ -2027,8 +2065,8 @@ void cfg80211_report_scan_frame(unsigned char vif_id, unsigned char *pData,
 	    && vif->cfg80211.scan_done_lock.link.prev != LIST_POISON2)
 		wake_unlock(&vif->cfg80211.scan_done_lock);
 	atomic_dec(&vif->cfg80211.scan_status);
-	/*memset(vif->cfg80211.scan_frame_array, 0,*/
-	/*MAX_SCAN_FRAME_BUF_NUM * sizeof(buf_scan_frame_t));*/
+	/*memset(vif->cfg80211.scan_frame_array, 0, */
+	/*MAX_SCAN_FRAME_BUF_NUM * sizeof(buf_scan_frame_t)); */
 	printkd("[%s %d] ok!\n", __func__, vif_id);
 	return;
 }
@@ -2051,8 +2089,8 @@ void cfg80211_report_mic_failure(unsigned char vif_id,
 		     vif->cfg80211.bssid[3], vif->cfg80211.bssid[4],
 		     vif->cfg80211.bssid[5]);
 		cfg80211_michael_mic_failure(vif->ndev, vif->cfg80211.bssid,
-					     (mic_failure->
-					      is_mcast ? NL80211_KEYTYPE_GROUP :
+					     (mic_failure->is_mcast ?
+					      NL80211_KEYTYPE_GROUP :
 					      NL80211_KEYTYPE_PAIRWISE),
 					     mic_failure->key_id, NULL,
 					     GFP_KERNEL);
@@ -2082,7 +2120,8 @@ void cfg80211_report_cqm_high(unsigned char vif_id,
 
 	if (vif) {
 		struct wiphy *wiphy = vif->wdev.wiphy;
-		wiphy_info(wiphy, "Recv  NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH");
+		wiphy_info(wiphy,
+			   "Recv  NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH");
 		if (sprdwl_find_ssid_count(vif) >= 2) {
 			cfg80211_cqm_rssi_notify(vif->ndev,
 						 NL80211_CQM_RSSI_THRESHOLD_EVENT_HIGH,
@@ -2095,7 +2134,7 @@ void cfg80211_report_cqm_beacon_loss(unsigned char vif_id,
 				     unsigned char *pdata, int len)
 {
 	wlan_vif_t *vif = id_to_vif(vif_id);
-
+	cfg80211_unlink_ssid(vif_id, vif->cfg80211.bssid, vif->cfg80211.ssid, vif->cfg80211.ssid_len );
 	if (vif) {
 		struct wiphy *wiphy = vif->wdev.wiphy;
 		wiphy_info(wiphy, "Recv NL80211_CQM_RSSI_BEACON_LOSS_EVENT");
@@ -2111,13 +2150,14 @@ void cfg80211_report_cqm_beacon_loss(unsigned char vif_id,
 }
 
 void cfg80211_report_version(unsigned char vif_id,
-                unsigned char *pdata, int len)
+			     unsigned char *pdata, int len)
 {
 	unsigned char wifi_info[100] = { 0 };
 	struct file *fp = 0;
 	loff_t *pos;
-	printkd("[wifi driver version is 0x%04x] [cp version is 0x%04x date is 0x%04x]\n",
-		g_wlan.version, *((int *)(pdata + 4)), *((int *)pdata));
+	printkd
+	    ("[wifi driver version is 0x%04x] [cp version is 0x%04x date is 0x%04x]\n",
+	     g_wlan.version, *((int *)(pdata + 4)), *((int *)pdata));
 
 	fp = filp_open(WIFI_VERSION_FILE, O_CREAT | O_RDWR, 0666);
 	if (IS_ERR(fp)) {
@@ -2125,7 +2165,8 @@ void cfg80211_report_version(unsigned char vif_id,
 		goto EXIT;
 	}
 	pos = &(fp->f_pos);
-	sprintf(wifi_info, "[wifi driver version is 0x%04x] [cp version is 0x%2x date is 0x%04x]",
+	sprintf(wifi_info,
+		"[wifi driver version is 0x%04x] [cp version is 0x%2x date is 0x%04x]",
 		g_wlan.version, *((int *)(pdata + 4)), *((int *)pdata));
 	vfs_write(fp, wifi_info, strlen(wifi_info), pos);
 
@@ -2133,17 +2174,17 @@ EXIT:
 	if (!(IS_ERR(fp)))
 		filp_close(fp, NULL);
 	return OK;
-} 
+}
 
 void cfg80211_report_mlme_tx_status(unsigned char vif_id,
-				unsigned char *pdata, int len)
+				    unsigned char *pdata, int len)
 {
 	struct wlan_report_mgmt_tx_status *tx_status = NULL;
 	wlan_vif_t *vif;
 
 	vif = id_to_vif(vif_id);
 	tx_status = (struct wlan_report_mgmt_tx_status *)pdata;
-	printkd("[%s]: index: %lld\n", __func__,tx_status->cookie);
+	printkd("[%s]: index: %lld\n", __func__, tx_status->cookie);
 	printkd("data len is %d\n", len);
 	hex_dump("receive is:", strlen("receive is:"), pdata, len);
 	cfg80211_mgmt_tx_status(&vif->wdev, tx_status->cookie, tx_status->buf,
@@ -2196,13 +2237,17 @@ static int wlan_cfg80211_mgmt_tx(struct wiphy *wiphy,
 	}
 
 	printkd("[%s][%d]enter\n", __func__, vif_id);
-	printkd("[%s], index: %lld, cookie: %lld\n", __func__, mgmt_index, *cookie);
+	printkd("[%s], index: %lld, cookie: %lld\n", __func__, mgmt_index,
+		*cookie);
 	*cookie = mgmt_index;
 	if (len > 0) {
-		ret = wlan_cmd_set_tx_mgmt(vif_id, chan, dont_wait_for_ack, wait, cookie, buf, len);
+		ret =
+		    wlan_cmd_set_tx_mgmt(vif_id, chan, dont_wait_for_ack, wait,
+					 cookie, buf, len);
 		if (ret) {
-			if(dont_wait_for_ack == false)
-				cfg80211_mgmt_tx_status(wdev, *cookie, buf, len, 0,GFP_KERNEL);
+			if (dont_wait_for_ack == false)
+				cfg80211_mgmt_tx_status(wdev, *cookie, buf, len,
+							0, GFP_KERNEL);
 			printkd("[%s] Failed to set tx mgmt!\n", __func__);
 			return ret;
 		}
@@ -2380,7 +2425,7 @@ static int wlan_change_beacon(wlan_vif_t *vif,
 static int itm_wlan_start_ap(wlan_vif_t *vif,
 			     struct cfg80211_beacon_data *beacon)
 {
-	#define SSID_LEN_OFFSET                (37)
+#define SSID_LEN_OFFSET                (37)
 	struct ieee80211_mgmt *mgmt;
 	u16 mgmt_len, index = 0;
 	int ret;
@@ -2395,7 +2440,7 @@ static int itm_wlan_start_ap(wlan_vif_t *vif,
 	}
 	mgmt_len = beacon->head_len;
 
-	/*add 1 byte for hidden ssid flag*/
+	/*add 1 byte for hidden ssid flag */
 	mgmt_len += 1;
 
 	if (beacon->tail)
@@ -2406,41 +2451,41 @@ static int itm_wlan_start_ap(wlan_vif_t *vif,
 		printkd("[%s][%d][%d]\n", __func__, __LINE__, mgmt);
 		return -EINVAL;
 	}
-	data = (u8 *)mgmt;
+	data = (u8 *) mgmt;
 
 	memcpy(data, beacon->head, SSID_LEN_OFFSET);
 	index += SSID_LEN_OFFSET;
 
-	/*hostapd config ssid by ioctl*/
+	/*hostapd config ssid by ioctl */
 	if (hssid->ssid_len == (unsigned char)*(beacon->head + index)) {
-		/*modify ssid_len*/
+		/*modify ssid_len */
 		*(data + index) = (unsigned char)(hssid->ssid_len + 1);
 		index += 1;
-		/*copy ssid*/
+		/*copy ssid */
 		memcpy(data + index, hssid->ssid, hssid->ssid_len);
 		index += hssid->ssid_len;
-		/*set hidden ssid flag*/
+		/*set hidden ssid flag */
 		*(data + index) = (unsigned char)(hssid->ignore_broadcast_ssid);
 		index += 1;
-	} else { /*hostapd not config ssid*/
+	} else {		/*hostapd not config ssid */
 		unsigned char org_len = (unsigned char)*(beacon->head + index);
-		/*modify ssid_len*/
+		/*modify ssid_len */
 		*(data + index) = org_len + 1;
 		index += 1;
-		/*copy ssid*/
+		/*copy ssid */
 		memcpy(data + index, beacon->head + index, org_len);
 		index += org_len;
-		/*set no hidden ssid flag*/
+		/*set no hidden ssid flag */
 		*(data + index) = 0;
 		index += 1;
 	}
-	/*cope left info*/
+	/*cope left info */
 	memcpy(data + index, beacon->head + index - 1,
-		   beacon->head_len + 1 - index);
+	       beacon->head_len + 1 - index);
 
 	if (beacon->tail)
 		memcpy(data + beacon->head_len + 1,
-			   beacon->tail, beacon->tail_len);
+		       beacon->tail, beacon->tail_len);
 
 	ret = wlan_cmd_start_ap(vif_id, (unsigned char *)mgmt, mgmt_len);
 	kfree(mgmt);
@@ -2600,8 +2645,8 @@ static int wlan_cfg80211_set_channel(struct wiphy *wiphy,
 	 */
 	ret =
 	    wlan_cmd_set_channel(vif_id,
-				 ieee80211_frequency_to_channel(channel->
-								center_freq));
+				 ieee80211_frequency_to_channel
+				 (channel->center_freq));
 	if (ret < 0) {
 		printkd("wlan_cmd_set_channel failed with ret %d\n", ret);
 		return ret;
@@ -2834,7 +2879,7 @@ static void init_wiphy_parameters(struct wiphy *wiphy)
 	wiphy->interface_modes |=
 	    BIT(NL80211_IFTYPE_P2P_CLIENT) | BIT(NL80211_IFTYPE_P2P_GO) |
 	    BIT(NL80211_IFTYPE_P2P_DEVICE);
-	wiphy->max_remain_on_channel_duration = 5000;
+	wiphy->max_remain_on_channel_duration = 2000;
 	wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
 	/* set AP SME flag, also needed by STA mode? */
 	wiphy->flags |= WIPHY_FLAG_HAVE_AP_SME;
@@ -2849,10 +2894,11 @@ static void init_wiphy_parameters(struct wiphy *wiphy)
 	wiphy->n_cipher_suites = ARRAY_SIZE(itm_cipher_suites);
 	/*Attach bands */
 	wiphy->bands[IEEE80211_BAND_2GHZ] = &itm_band_2ghz;
-	/*wiphy->bands[IEEE80211_BAND_5GHZ] = &itm_band_5ghz;*/
+	/*wiphy->bands[IEEE80211_BAND_5GHZ] = &itm_band_5ghz; */
 
 	/*Default not in powersave state */
 	wiphy->flags &= ~WIPHY_FLAG_PS_ON_BY_DEFAULT;
+	wiphy->flags |= WIPHY_FLAG_CUSTOM_REGULATORY;
 #if defined(CONFIG_PM) && (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 10, 0))
 	/*Set WoWLAN flags */
 	wiphy->wowlan.flags = WIPHY_WOWLAN_ANY | WIPHY_WOWLAN_DISCONNECT;
