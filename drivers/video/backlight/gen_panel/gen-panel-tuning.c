@@ -271,7 +271,7 @@ static int load_tuning_data(struct lcd *lcd, char *filename)
 	dp = kmalloc(l + 10, GFP_KERNEL);
 	if (dp == NULL) {
 		pr_err("%s: not enough memory\n", __func__);
-		filp_close(filp, current->files);
+		filp_close(filp, NULL);
 		return -1;
 	}
 	pos = 0;
@@ -280,10 +280,10 @@ static int load_tuning_data(struct lcd *lcd, char *filename)
 	if (ret != l) {
 		pr_err("%s: fail to read (%d)\n", __func__, ret);
 		kfree(dp);
-		filp_close(filp, current->files);
+		filp_close(filp, NULL);
 		return -1;
 	}
-	filp_close(filp, current->files);
+	filp_close(filp, NULL);
 
 	set_fs(fs);
 	unload_tuning_data(lcd);
