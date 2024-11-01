@@ -85,6 +85,7 @@ obj-$(CONFIG_MACH_TSHARK2GOYAL) += dma_r4p0.o board_common_battery.o syssleep.o
 obj-$(CONFIG_MACH_GTEL3G) += dma_r4p0.o board_common_battery.o syssleep.o
 obj-$(CONFIG_MACH_GTELWIFI) += dma_r4p0.o board_common_battery.o syssleep.o
 obj-$(CONFIG_MACH_J13G) += dma_r4p0.o board_common_battery.o syssleep.o
+obj-$(CONFIG_MACH_J1POP3G) += dma_r4p0.o board_common_battery.o syssleep.o
 obj-$(CONFIG_MACH_KANAS_W) += board-kanas_w.o board_common_battery.o
 obj-$(CONFIG_MACH_KANAS_TD) += board-kanas_td.o board_common_battery.o
 obj-$(CONFIG_MACH_SP7715EATRISIM) += board-sp7715eatrisim.o board_common_battery.o
