@@ -316,11 +316,11 @@ dtb-$(CONFIG_MACH_J13G) += sprd-scx35_j13g_rev00.dtb \
 				sprd-scx35_j13g_rev01.dtb \
 				sprd-scx35_j13g_rev02.dtb
 
-dtb-$(CONFIG_MACH_J1POP3G) += sprd-scx35_j1pop3g_r00.dtb \
-				sprd-scx35_j1pop3g_r01.dtb \
-				sprd-scx35_j1pop3g_r02.dtb \
-				sprd-scx35_j1pop3g_r03.dtb \
-				sprd-scx35_j1pop3g_r04.dtb
+dtb-$(CONFIG_MACH_J1POP3G) += sprd-scx35_j1pop3g-r00.dts \
+				sprd-scx35_j1pop3g-r01.dts \
+				sprd-scx35_j1pop3g-r02.dts \
+				sprd-scx35_j1pop3g-r03.dts \
+				sprd-scx35_j1pop3g-r04.dts
 
 DTB_NAMES := $(subst $\",,$(CONFIG_BUILD_ARM_APPENDED_DTB_IMAGE_NAMES))
 ifneq ($(DTB_NAMES),)
