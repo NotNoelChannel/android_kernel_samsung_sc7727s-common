@@ -2105,14 +2105,6 @@ static int gen_panel_parse_dt_panel(
 			"gen-panel-aid-map-table", &aid_map_table);
 	gen_panel_parse_dt_candela_map_table(np,
 			"gen-panel-elvss-map-table", &elvss_map_table);
-	if (of_find_property(np, "gen-panel-candela-table", &sz)) {
-		nr_candela = sz / sizeof(u32);
-		candela_table =
-			kzalloc(sizeof(unsigned int) * nr_candela, GFP_KERNEL);
-		of_property_read_u32_array(np, "gen-panel-candela-table",
-				candela_table, nr_candela);
-		gen_panel_init_brt_map();
-	}
 #endif
 	ret = of_property_read_u32(np,
 			"gen-panel-backlight-set-brightness-reg",
