@@ -61,6 +61,6 @@ obj-$(CONFIG_BCM4343)	+= bcmdhd/
 obj-$(CONFIG_BRCMFMAC)	+= brcm80211/
 obj-$(CONFIG_BRCMSMAC)	+= brcm80211/
 
-#obj-$(CONFIG_SPRDWL)	+= sprdwl/
+obj-$(CONFIG_SPRDWL)	+= sprdwl/
 obj-$(CONFIG_SC2331)    += sc2331/
 obj-$(CONFIG_SC2331_MEM_ALLOC)  += sc2331/sc2331_mem_alloc/
