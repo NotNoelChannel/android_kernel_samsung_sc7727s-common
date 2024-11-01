@@ -756,6 +756,19 @@ config MACH_J13G
 	help
 	J13G board based on SC8830g serial.
 
+config MACH_J1POP3G
+	bool "j1 pop 3g Board"
+	depends on ARCH_SC
+	depends on ARCH_SCX35
+	select MACH_SAMSUNG
+	select MUIC_CABLE_DETECT
+	select FUELGAUGE_SPRD4SAMSUNG27X3
+	select CLKSRC_OF if OF
+	select COMMON_CLK if OF
+	default n
+	help
+	J1POP3G board based on SC8830g serial.
+
 config MACH_SAMSUNG
 	bool "Samsung Board"
 	default n
