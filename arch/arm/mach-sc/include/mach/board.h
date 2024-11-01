@@ -242,6 +242,10 @@
 #include "__board-j13g.h"
 #endif
 
+#ifdef	CONFIG_MACH_J1POP3G
+#include "__board-j1pop3g.h"
+#endif
+
 #ifdef CONFIG_MACH_YOUNG33G
 #include "__board-young33g.h"
 #endif
