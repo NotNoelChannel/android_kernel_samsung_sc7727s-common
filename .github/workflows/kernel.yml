@@ -1,4 +1,4 @@
-name: Kernel CI
+name: Kernel CI (SM-J110H)
 
 on:
   workflow_dispatch:
