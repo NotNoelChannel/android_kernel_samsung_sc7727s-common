@@ -1,4 +1,4 @@
-name: Kernel CI (SM-G316HU)
+name: Kernel CI (SM-G318H)
 on:
   workflow_dispatch:
 jobs:
